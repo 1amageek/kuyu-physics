@@ -3,7 +3,7 @@ import Testing
 import KuyuCore
 
 @Test func referenceQuadrotorParametersExist() {
-    let params = ReferenceQuadrotorParameters.nominal
+    let params = ReferenceQuadrotorParameters.baseline
     #expect(params.mass > 0)
     #expect(params.armLength > 0)
 }
