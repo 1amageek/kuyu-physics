@@ -8,6 +8,19 @@ public struct RobotDescriptor: Sendable, Codable, Equatable {
         case custom
     }
 
+    public enum ObservationSyncPolicy: String, Sendable, Codable, Equatable {
+        case hard
+        case soft
+    }
+
+    public enum ObservationModalityType: String, Sendable, Codable, Equatable {
+        case state
+        case event
+        case vision
+        case audio
+        case tactile
+    }
+
     public struct Robot: Sendable, Codable, Equatable {
         public let robotID: String
         public let name: String
@@ -161,6 +174,7 @@ public struct RobotDescriptor: Sendable, Codable, Equatable {
         public let drive: [SignalDefinition]
         public let reflex: [SignalDefinition]
         public let descending: [SignalDefinition]?
+        public let summary: [SignalDefinition]?
         public let motorNerve: [SignalDefinition]?
 
         public init(
@@ -169,6 +183,7 @@ public struct RobotDescriptor: Sendable, Codable, Equatable {
             drive: [SignalDefinition],
             reflex: [SignalDefinition],
             descending: [SignalDefinition]? = nil,
+            summary: [SignalDefinition]? = nil,
             motorNerve: [SignalDefinition]? = nil
         ) {
             self.sensor = sensor
@@ -176,6 +191,7 @@ public struct RobotDescriptor: Sendable, Codable, Equatable {
             self.drive = drive
             self.reflex = reflex
             self.descending = descending
+            self.summary = summary
             self.motorNerve = motorNerve
         }
     }
@@ -342,22 +358,113 @@ public struct RobotDescriptor: Sendable, Codable, Equatable {
         }
     }
 
+    public struct LatencyBudgetsMs: Sendable, Codable, Equatable {
+        public let reflexPathBudgetMs: Double
+        public let corePathBudgetMs: Double
+        public let descendingApplyBudgetMs: Double
+        public let summaryExportBudgetMs: Double
+
+        public init(
+            reflexPathBudgetMs: Double,
+            corePathBudgetMs: Double,
+            descendingApplyBudgetMs: Double,
+            summaryExportBudgetMs: Double
+        ) {
+            self.reflexPathBudgetMs = reflexPathBudgetMs
+            self.corePathBudgetMs = corePathBudgetMs
+            self.descendingApplyBudgetMs = descendingApplyBudgetMs
+            self.summaryExportBudgetMs = summaryExportBudgetMs
+        }
+    }
+
     public struct Control: Sendable, Codable, Equatable {
         public let driveChannels: [String]
         public let reflexChannels: [String]
         public let descendingChannels: [String]?
+        public let summaryChannels: [String]?
         public let constraints: ControlConstraints?
+        public let latencyBudgetsMs: LatencyBudgetsMs?
 
         public init(
             driveChannels: [String],
             reflexChannels: [String],
             descendingChannels: [String]? = nil,
-            constraints: ControlConstraints? = nil
+            summaryChannels: [String]? = nil,
+            constraints: ControlConstraints? = nil,
+            latencyBudgetsMs: LatencyBudgetsMs? = nil
         ) {
             self.driveChannels = driveChannels
             self.reflexChannels = reflexChannels
             self.descendingChannels = descendingChannels
+            self.summaryChannels = summaryChannels
             self.constraints = constraints
+            self.latencyBudgetsMs = latencyBudgetsMs
+        }
+    }
+
+    public struct ObservationProvenance: Sendable, Codable, Equatable {
+        public let producer: String?
+        public let transport: String?
+        public let notes: String?
+
+        public init(producer: String? = nil, transport: String? = nil, notes: String? = nil) {
+            self.producer = producer
+            self.transport = transport
+            self.notes = notes
+        }
+    }
+
+    public struct ModalityDefinition: Sendable, Codable, Equatable {
+        public let id: String
+        public let type: ObservationModalityType
+        public let channels: [String]?
+        public let timestampSource: String
+        public let provenance: ObservationProvenance?
+
+        public init(
+            id: String,
+            type: ObservationModalityType,
+            channels: [String]? = nil,
+            timestampSource: String,
+            provenance: ObservationProvenance? = nil
+        ) {
+            self.id = id
+            self.type = type
+            self.channels = channels
+            self.timestampSource = timestampSource
+            self.provenance = provenance
+        }
+    }
+
+    public struct ObservationClock: Sendable, Codable, Equatable {
+        public let timebase: String
+        public let epoch: String?
+        public let maxSkewMs: Double
+        public let syncPolicy: ObservationSyncPolicy
+
+        public init(
+            timebase: String,
+            epoch: String? = nil,
+            maxSkewMs: Double,
+            syncPolicy: ObservationSyncPolicy
+        ) {
+            self.timebase = timebase
+            self.epoch = epoch
+            self.maxSkewMs = maxSkewMs
+            self.syncPolicy = syncPolicy
+        }
+    }
+
+    public struct Observation: Sendable, Codable, Equatable {
+        public let clock: ObservationClock?
+        public let modalities: [ModalityDefinition]?
+
+        public init(
+            clock: ObservationClock? = nil,
+            modalities: [ModalityDefinition]? = nil
+        ) {
+            self.clock = clock
+            self.modalities = modalities
         }
     }
 
@@ -413,6 +520,7 @@ public struct RobotDescriptor: Sendable, Codable, Equatable {
     public let sensors: [SensorDefinition]
     public let actuators: [ActuatorDefinition]
     public let control: Control
+    public let observation: Observation?
     public let motorNerve: MotorNerveDescriptor
 
     public init(
@@ -423,6 +531,7 @@ public struct RobotDescriptor: Sendable, Codable, Equatable {
         sensors: [SensorDefinition],
         actuators: [ActuatorDefinition],
         control: Control,
+        observation: Observation? = nil,
         motorNerve: MotorNerveDescriptor
     ) {
         self.robot = robot
@@ -432,6 +541,7 @@ public struct RobotDescriptor: Sendable, Codable, Equatable {
         self.sensors = sensors
         self.actuators = actuators
         self.control = control
+        self.observation = observation
         self.motorNerve = motorNerve
     }
 }

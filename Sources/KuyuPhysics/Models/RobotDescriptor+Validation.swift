@@ -10,6 +10,7 @@ public extension RobotDescriptor {
         case nonFinite(String)
         case invalidMotorNerveMapping(String)
         case invalidPhysicsFormat(String)
+        case invalidObservation(String)
     }
 
     func validate() throws {
@@ -19,6 +20,7 @@ public extension RobotDescriptor {
         try validateSensors(signals: signalIndex)
         try validateActuators(signals: signalIndex)
         try validateControl(signals: signalIndex)
+        try validateObservation(signals: signalIndex)
         try validateMotorNerve(signals: signalIndex)
     }
 
@@ -48,8 +50,15 @@ public extension RobotDescriptor {
 
     private func validateSignals() throws -> SignalIndex {
         let descendingSignals = signals.descending ?? []
+        let summarySignals = signals.summary ?? []
         let motorNerveSignals = signals.motorNerve ?? []
-        let allSignals = signals.sensor + signals.actuator + signals.drive + signals.reflex + descendingSignals + motorNerveSignals
+        let allSignals = signals.sensor
+            + signals.actuator
+            + signals.drive
+            + signals.reflex
+            + descendingSignals
+            + summarySignals
+            + motorNerveSignals
         var idSet: Set<String> = []
         for signal in allSignals {
             if signal.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -82,6 +91,9 @@ public extension RobotDescriptor {
         if !descendingSignals.isEmpty {
             try validateSignalIndices(descendingSignals, label: "descending")
         }
+        if !summarySignals.isEmpty {
+            try validateSignalIndices(summarySignals, label: "summary")
+        }
         if !motorNerveSignals.isEmpty {
             try validateSignalIndices(motorNerveSignals, label: "motorNerve")
         }
@@ -93,6 +105,7 @@ public extension RobotDescriptor {
             drive: Set(signals.drive.map { $0.id }),
             reflex: Set(signals.reflex.map { $0.id }),
             descending: Set(descendingSignals.map { $0.id }),
+            summary: Set(summarySignals.map { $0.id }),
             motorNerve: Set(motorNerveSignals.map { $0.id })
         )
     }
@@ -196,12 +209,85 @@ public extension RobotDescriptor {
                 }
             }
         }
+        if let summaryChannels = control.summaryChannels {
+            for channel in summaryChannels {
+                if !signals.summary.contains(channel) {
+                    throw ValidationError.unknownSignalRef(channel)
+                }
+            }
+        }
         if let constraints = control.constraints {
             if let range = constraints.driveClamp {
                 try validateRange(range, field: "control.constraints.driveClamp")
             }
             if let range = constraints.reflexClamp {
                 try validateRange(range, field: "control.constraints.reflexClamp")
+            }
+        }
+        if let budgets = control.latencyBudgetsMs {
+            try ensureFinite(budgets.reflexPathBudgetMs, "control.latencyBudgetsMs.reflexPathBudgetMs")
+            try ensureFinite(budgets.corePathBudgetMs, "control.latencyBudgetsMs.corePathBudgetMs")
+            try ensureFinite(budgets.descendingApplyBudgetMs, "control.latencyBudgetsMs.descendingApplyBudgetMs")
+            try ensureFinite(budgets.summaryExportBudgetMs, "control.latencyBudgetsMs.summaryExportBudgetMs")
+
+            if budgets.reflexPathBudgetMs <= 0 {
+                throw ValidationError.invalidRange("control.latencyBudgetsMs.reflexPathBudgetMs")
+            }
+            if budgets.corePathBudgetMs <= 0 {
+                throw ValidationError.invalidRange("control.latencyBudgetsMs.corePathBudgetMs")
+            }
+            if budgets.descendingApplyBudgetMs <= 0 {
+                throw ValidationError.invalidRange("control.latencyBudgetsMs.descendingApplyBudgetMs")
+            }
+            if budgets.summaryExportBudgetMs <= 0 {
+                throw ValidationError.invalidRange("control.latencyBudgetsMs.summaryExportBudgetMs")
+            }
+        }
+    }
+
+    private func validateObservation(signals: SignalIndex) throws {
+        guard let observation else { return }
+
+        if let clock = observation.clock {
+            if clock.timebase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ValidationError.empty("observation.clock.timebase")
+            }
+            if let epoch = clock.epoch,
+               epoch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ValidationError.empty("observation.clock.epoch")
+            }
+            try ensureFinite(clock.maxSkewMs, "observation.clock.maxSkewMs")
+            if clock.maxSkewMs < 0 {
+                throw ValidationError.invalidRange("observation.clock.maxSkewMs")
+            }
+        }
+
+        guard let modalities = observation.modalities else { return }
+        var ids: Set<String> = []
+        for modality in modalities {
+            if modality.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ValidationError.empty("observation.modalities.id")
+            }
+            if !ids.insert(modality.id).inserted {
+                throw ValidationError.invalidObservation("duplicate-modality-id:\(modality.id)")
+            }
+            if modality.timestampSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ValidationError.empty("observation.modalities.timestampSource")
+            }
+            if let channels = modality.channels {
+                for channel in channels where !signals.all.contains(channel) {
+                    throw ValidationError.unknownSignalRef(channel)
+                }
+            }
+            if let provenance = modality.provenance {
+                if let producer = provenance.producer,
+                   producer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw ValidationError.empty("observation.modalities.provenance.producer")
+                }
+                if let transport = provenance.transport,
+                   transport.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw ValidationError.empty("observation.modalities.provenance.transport")
+                }
             }
         }
     }
@@ -354,6 +440,7 @@ public extension RobotDescriptor {
         let drive: Set<String>
         let reflex: Set<String>
         let descending: Set<String>
+        let summary: Set<String>
         let motorNerve: Set<String>
     }
 }
