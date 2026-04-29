@@ -7,6 +7,7 @@ public struct SwappableSensorField: SensorField {
     public let hfEvents: [HFStressEvent]
     public let baseNoise: IMU6NoiseConfig
     public let seed: UInt64
+    public let stateChannelStore: ReferenceQuadrotorWorldStore?
 
     private var delayBuffer: SampleDelayBuffer
     private var currentDelay: UInt64
@@ -17,16 +18,19 @@ public struct SwappableSensorField: SensorField {
         swapEvents: [SwapEvent],
         hfEvents: [HFStressEvent],
         baseNoise: IMU6NoiseConfig,
-        seed: UInt64
+        seed: UInt64,
+        stateChannelStore: ReferenceQuadrotorWorldStore? = nil
     ) {
         self.base = base
         self.swapEvents = swapEvents
         self.hfEvents = hfEvents
         self.baseNoise = baseNoise
         self.seed = seed
+        self.stateChannelStore = stateChannelStore
         self.currentDelay = 0
         self.delayBuffer = SampleDelayBuffer(delaySteps: 0)
-        self.noiseModels = (0..<6).map { GaussianNoise(stdDev: 1.0, seed: seed &+ UInt64($0 + 1)) }
+        let channelCount = stateChannelStore == nil ? 6 : 8
+        self.noiseModels = (0..<channelCount).map { GaussianNoise(stdDev: 1.0, seed: seed &+ UInt64($0 + 1)) }
     }
 
     public mutating func sample(time: WorldTime) throws -> [ChannelSample] {
@@ -35,18 +39,34 @@ public struct SwappableSensorField: SensorField {
             return []
         }
 
-        let modifiers = modifiersForTime(time)
+        var rawSamples = baseSamples
+        rawSamples.reserveCapacity(baseSamples.count + (stateChannelStore == nil ? 0 : 2))
+        if let stateChannelStore {
+            rawSamples.append(try ChannelSample(
+                channelIndex: 6,
+                value: stateChannelStore.state.position.z,
+                timestamp: time.time
+            ))
+            rawSamples.append(try ChannelSample(
+                channelIndex: 7,
+                value: stateChannelStore.state.velocity.z,
+                timestamp: time.time
+            ))
+        }
+
+        let channelCount = rawSamples.reduce(0) { max($0, Int($1.channelIndex) + 1) }
+        let modifiers = modifiersForTime(time, channelCount: channelCount)
         if modifiers.delaySteps != currentDelay {
             currentDelay = modifiers.delaySteps
             delayBuffer = SampleDelayBuffer(delaySteps: currentDelay)
         }
 
         var updated: [ChannelSample] = []
-        updated.reserveCapacity(baseSamples.count)
+        updated.reserveCapacity(rawSamples.count)
 
-        for sample in baseSamples {
+        for sample in rawSamples {
             let idx = Int(sample.channelIndex)
-            guard idx >= 0, idx < 6 else { continue }
+            guard idx >= 0, idx < modifiers.channel.count else { continue }
 
             let channelMods = modifiers.channel[idx]
             if channelMods.dropoutProbability > 0 {
@@ -63,6 +83,11 @@ public struct SwappableSensorField: SensorField {
             var value = sample.value
             value = value * channelMods.gainScale + channelMods.biasShift
             if extraStd > 0 {
+                if idx >= noiseModels.count {
+                    noiseModels.append(contentsOf: (noiseModels.count...idx).map {
+                        GaussianNoise(stdDev: 1.0, seed: seed &+ UInt64($0 + 1))
+                    })
+                }
                 noiseModels[idx].stdDev = extraStd
                 value += noiseModels[idx].sample()
             }
@@ -89,8 +114,8 @@ public struct SwappableSensorField: SensorField {
         return rng.nextDouble()
     }
 
-    private func modifiersForTime(_ time: WorldTime) -> Modifiers {
-        var modifiers = Modifiers()
+    private func modifiersForTime(_ time: WorldTime, channelCount: Int) -> Modifiers {
+        var modifiers = Modifiers(channelCount: channelCount)
         let now = time.time
 
         for event in swapEvents {
@@ -149,7 +174,11 @@ public struct SwappableSensorField: SensorField {
     }
 
     private struct Modifiers {
-        var channel: [ChannelModifiers] = Array(repeating: ChannelModifiers(), count: 6)
+        var channel: [ChannelModifiers]
         var delaySteps: UInt64 = 0
+
+        init(channelCount: Int) {
+            self.channel = Array(repeating: ChannelModifiers(), count: max(0, channelCount))
+        }
     }
 }

@@ -7,6 +7,7 @@ public struct ImuRateDampingDriveCut: CutInterface {
         case invalidMaxThrust
         case nonFiniteState
         case invalidMixerParameters
+        case invalidTiltConfiguration
     }
 
     public var hoverThrust: Double
@@ -23,6 +24,8 @@ public struct ImuRateDampingDriveCut: CutInterface {
     public var fallAccelThreshold: Double
     public var fallTiltBias: Double
     public var fallThrustBoost: Double
+    public var tiltCorrectionTimeConstant: Double?
+    public var maxTiltThrustCompensation: Double
 
     private var gyro: SIMD3<Double>
     private var accel: SIMD3<Double>
@@ -44,11 +47,26 @@ public struct ImuRateDampingDriveCut: CutInterface {
         spinDirections: SIMD4<Double> = SIMD4<Double>(1, -1, 1, -1),
         fallAccelThreshold: Double = 0.35,
         fallTiltBias: Double = 0.12,
-        fallThrustBoost: Double = 0.15
+        fallThrustBoost: Double = 0.15,
+        initialRoll: Double = 0.0,
+        initialPitch: Double = 0.0,
+        tiltCorrectionTimeConstant: Double? = 0.4,
+        maxTiltThrustCompensation: Double = 1.35
     ) throws {
         guard hoverThrust.isFinite else { throw CutError.invalidHoverThrust }
         guard armLength > 0, yawCoefficient > 0 else { throw CutError.invalidMixerParameters }
         guard maxThrust > 0, maxThrust.isFinite else { throw CutError.invalidMaxThrust }
+        guard initialRoll.isFinite,
+              initialPitch.isFinite,
+              maxTiltThrustCompensation.isFinite,
+              maxTiltThrustCompensation >= 1.0 else {
+            throw CutError.invalidTiltConfiguration
+        }
+        if let tiltCorrectionTimeConstant {
+            guard tiltCorrectionTimeConstant.isFinite, tiltCorrectionTimeConstant > 0 else {
+                throw CutError.invalidTiltConfiguration
+            }
+        }
 
         self.hoverThrust = hoverThrust
         self.kp = kp
@@ -64,10 +82,12 @@ public struct ImuRateDampingDriveCut: CutInterface {
         self.fallAccelThreshold = fallAccelThreshold
         self.fallTiltBias = fallTiltBias
         self.fallThrustBoost = fallThrustBoost
+        self.tiltCorrectionTimeConstant = tiltCorrectionTimeConstant
+        self.maxTiltThrustCompensation = maxTiltThrustCompensation
         self.gyro = SIMD3<Double>(repeating: 0)
         self.accel = SIMD3<Double>(0, 0, 1)
-        self.estimatedRoll = 0
-        self.estimatedPitch = 0
+        self.estimatedRoll = initialRoll
+        self.estimatedPitch = initialPitch
         self.lastTime = nil
     }
 
@@ -99,7 +119,8 @@ public struct ImuRateDampingDriveCut: CutInterface {
 
         guard tauX.isFinite, tauY.isFinite, tauZ.isFinite else { throw CutError.nonFiniteState }
 
-        let totalThrust = hoverThrust * 4.0 * (1.0 + fallFactor * fallThrustBoost)
+        let tiltCompensation = thrustCompensation(roll: desiredRoll, pitch: desiredPitch)
+        let totalThrust = hoverThrust * 4.0 * tiltCompensation * (1.0 + fallFactor * fallThrustBoost)
         let throttle = clamp(totalThrust / max(4.0 * maxThrust, 1e-6), lower: 0.0, upper: 1.0)
         let rollDenom = max(2.0 * armLength * maxThrust * rollScale, 1e-6)
         let pitchDenom = max(2.0 * armLength * maxThrust * pitchScale, 1e-6)
@@ -145,14 +166,24 @@ public struct ImuRateDampingDriveCut: CutInterface {
         estimatedRoll += gyro.x * dt
         estimatedPitch += gyro.y * dt
 
-        if dt > 0 {
-            let tau = 0.4
+        if dt > 0, let tau = tiltCorrectionTimeConstant {
             let alpha = exp(-dt / tau)
             estimatedRoll = alpha * estimatedRoll + (1 - alpha) * accelRoll
             estimatedPitch = alpha * estimatedPitch + (1 - alpha) * accelPitch
         }
 
         return (estimatedRoll, estimatedPitch)
+    }
+
+    private func thrustCompensation(roll: Double, pitch: Double) -> Double {
+        let bodyZ = SIMD3<Double>(
+            sin(pitch),
+            -sin(roll) * cos(pitch),
+            cos(roll) * cos(pitch)
+        )
+        let verticalAuthority = max(0.2, bodyZ.z)
+        let compensation = 1.0 / verticalAuthority
+        return clamp(compensation, lower: 1.0, upper: maxTiltThrustCompensation)
     }
 
     private func clamp(_ value: Double, lower: Double, upper: Double) -> Double {

@@ -44,10 +44,16 @@ public struct ReferenceQuadrotorDynamics: Sendable {
         let s4 = state.applying(derivative: k3, scale: delta)
         let k4 = derivative(state: s4, input: input, parameters: parameters, gravity: gravity)
 
-        let position = state.position + (k1.position + k2.position * 2 + k3.position * 2 + k4.position) * (delta / 6)
-        let velocity = state.velocity + (k1.velocity + k2.velocity * 2 + k3.velocity * 2 + k4.velocity) * (delta / 6)
-        let orientationVector = state.orientation.vector + (k1.orientation + k2.orientation * 2 + k3.orientation * 2 + k4.orientation) * (delta / 6)
-        let angularVelocity = state.angularVelocity + (k1.angularVelocity + k2.angularVelocity * 2 + k3.angularVelocity * 2 + k4.angularVelocity) * (delta / 6)
+        let step = delta / 6.0
+        let positionDelta = weightedSum(k1.position, k2.position, k3.position, k4.position) * step
+        let velocityDelta = weightedSum(k1.velocity, k2.velocity, k3.velocity, k4.velocity) * step
+        let orientationDelta = weightedSum(k1.orientation, k2.orientation, k3.orientation, k4.orientation) * step
+        let angularVelocityDelta = weightedSum(k1.angularVelocity, k2.angularVelocity, k3.angularVelocity, k4.angularVelocity) * step
+
+        let position = state.position + positionDelta
+        let velocity = state.velocity + velocityDelta
+        let orientationVector = state.orientation.vector + orientationDelta
+        let angularVelocity = state.angularVelocity + angularVelocityDelta
 
         let orientation = simd_quatd(vector: orientationVector).normalizedQuat
 
@@ -70,5 +76,23 @@ public struct ReferenceQuadrotorDynamics: Sendable {
         let acceleration = (forceWorld / parameters.mass) + gravityWorld
         let withoutGravity = acceleration - gravityWorld
         return state.orientation.inverse.act(withoutGravity)
+    }
+
+    private static func weightedSum(
+        _ k1: SIMD3<Double>,
+        _ k2: SIMD3<Double>,
+        _ k3: SIMD3<Double>,
+        _ k4: SIMD3<Double>
+    ) -> SIMD3<Double> {
+        k1 + (k2 * 2.0) + (k3 * 2.0) + k4
+    }
+
+    private static func weightedSum(
+        _ k1: SIMD4<Double>,
+        _ k2: SIMD4<Double>,
+        _ k3: SIMD4<Double>,
+        _ k4: SIMD4<Double>
+    ) -> SIMD4<Double> {
+        k1 + (k2 * 2.0) + (k3 * 2.0) + k4
     }
 }

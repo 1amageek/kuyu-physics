@@ -16,7 +16,7 @@ public struct LiftMotorNerve: MotorNerveEndpoint {
         _ = telemetry
         _ = time
         let adjusted = try applyCorrections(drives: drives, corrections: corrections)
-        let throttle = adjusted.first(where: { $0.index.rawValue == 0 })?.activation ?? 0.0
+        let throttle = driveValue(index: 0, from: adjusted)
         let clamped = clamp(throttle, lower: 0.0, upper: 1.0)
         var commands: [ActuatorValue] = []
         commands.reserveCapacity(4)
@@ -56,6 +56,10 @@ public struct LiftMotorNerve: MotorNerveEndpoint {
             let adjusted = clamped + entry.delta
             return try DriveIntent(index: drive.index, activation: adjusted)
         }
+    }
+
+    private func driveValue(index: UInt32, from drives: [DriveIntent]) -> Double {
+        drives.first(where: { $0.index.rawValue == index })?.activation ?? 0.0
     }
 
     private func clamp(_ value: Double, lower: Double, upper: Double) -> Double {
