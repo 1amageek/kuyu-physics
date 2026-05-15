@@ -16,6 +16,7 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
     private let stages: [RobotDescriptor.MotorNerveStage]
     private let driveChannels: [String]
     private let driveClamp: RobotDescriptor.Range?
+    private let driveLimits: [String: RobotDescriptor.Range]
     private let actuatorSignals: [RobotDescriptor.SignalDefinition]
     private let actuatorLimits: [String: RobotDescriptor.Range]
     private let normalizedActuatorSignals: Set<String>
@@ -25,6 +26,10 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
         self.stages = descriptor.motorNerve.stages
         self.driveChannels = descriptor.control.driveChannels
         self.driveClamp = descriptor.control.constraints?.driveClamp
+        self.driveLimits = Dictionary(uniqueKeysWithValues: descriptor.signals.drive.compactMap { signal in
+            guard let range = signal.range else { return nil }
+            return (signal.id, range)
+        })
         self.actuatorSignals = descriptor.signals.actuator
         self.actuatorLimits = MotorNerveChain.buildActuatorLimits(from: descriptor.actuators)
         self.normalizedActuatorSignals = MotorNerveChain.normalizedActuatorOutputs(from: descriptor.motorNerve.stages)
@@ -140,7 +145,9 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
     }
 
     private func clampDrive(_ drive: DriveIntent) throws -> DriveIntent {
-        guard let clamp = driveClamp else { return drive }
+        let offset = Int(drive.index.rawValue)
+        let signalRange = driveChannels.indices.contains(offset) ? driveLimits[driveChannels[offset]] : nil
+        guard let clamp = signalRange ?? driveClamp else { return drive }
         let value = min(max(drive.activation, clamp.min), clamp.max)
         return try DriveIntent(index: drive.index, activation: value, parameters: drive.parameters)
     }
