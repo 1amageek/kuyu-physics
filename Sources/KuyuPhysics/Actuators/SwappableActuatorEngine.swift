@@ -45,15 +45,37 @@ public struct SwappableActuatorEngine<Engine: ActuatorEngine>: ActuatorEngine {
             let baseMax = baseMaxThrusts.max(forIndex: index)
             let maxOutput = baseMax * mod.maxOutputScale
 
-            var updated = value.value * mod.gainScale
+            let gained = value.value * mod.gainScale
+            // Asymmetry/lag/rate-limit are relative to the previous output; on the first
+            // step (no previous output) they must be no-ops.
+            let hasPrevious = lastValues[index] != nil
+            let previous = lastValues[index] ?? gained
+            var updated = gained
+
+            // Rising-edge gain asymmetry: a faulty actuator responds more slowly to
+            // increasing commands than to decreasing ones.
+            if hasPrevious, mod.asymmetryScale != 1.0, updated > previous {
+                updated = previous + (updated - previous) * mod.asymmetryScale
+            }
+
             if abs(updated) < mod.deadzoneShift {
                 updated = 0
             }
 
-            let previous = lastValues[index] ?? updated
-            if mod.lagScale > 1 {
+            if hasPrevious, mod.lagScale > 1 {
                 let factor = 1.0 / mod.lagScale
                 updated = previous + (updated - previous) * factor
+            }
+
+            // Per-step slew limit as a fraction of full-scale output.
+            if hasPrevious, mod.rateLimitScale < 1.0 {
+                let maxDelta = maxOutput * mod.rateLimitScale
+                let delta = updated - previous
+                if delta > maxDelta {
+                    updated = previous + maxDelta
+                } else if delta < -maxDelta {
+                    updated = previous - maxDelta
+                }
             }
 
             updated = min(max(updated, 0), maxOutput)
@@ -76,6 +98,8 @@ public struct SwappableActuatorEngine<Engine: ActuatorEngine>: ActuatorEngine {
             entry.lagScale *= swap.lagScale
             entry.maxOutputScale *= swap.maxOutputScale
             entry.deadzoneShift = max(entry.deadzoneShift, abs(swap.deadzoneShift))
+            entry.rateLimitScale = min(entry.rateLimitScale, swap.rateLimitScale)
+            entry.asymmetryScale *= swap.asymmetryScale
             modifiers[swap.motorIndex] = entry
         }
 
@@ -102,5 +126,7 @@ public struct SwappableActuatorEngine<Engine: ActuatorEngine>: ActuatorEngine {
         var lagScale: Double = 1.0
         var maxOutputScale: Double = 1.0
         var deadzoneShift: Double = 0.0
+        var rateLimitScale: Double = 1.0
+        var asymmetryScale: Double = 1.0
     }
 }

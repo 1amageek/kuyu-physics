@@ -1,8 +1,8 @@
 import Foundation
 import KuyuCore
 
-public struct SwappableSensorField: SensorField {
-    public var base: IMU6SensorField
+public struct SwappableSensorField<Base: SensorField>: SensorField {
+    public var base: Base
     public let swapEvents: [SwapEvent]
     public let hfEvents: [HFStressEvent]
     public let baseNoise: IMU6NoiseConfig
@@ -12,9 +12,12 @@ public struct SwappableSensorField: SensorField {
     private var delayBuffer: SampleDelayBuffer
     private var currentDelay: UInt64
     private var noiseModels: [GaussianNoise]
+    /// Per-channel first-order low-pass state for bandwidth modeling. `nil` until a
+    /// channel produces its first post-modifier sample.
+    private var filterState: [Double?]
 
     public init(
-        base: IMU6SensorField,
+        base: Base,
         swapEvents: [SwapEvent],
         hfEvents: [HFStressEvent],
         baseNoise: IMU6NoiseConfig,
@@ -31,6 +34,7 @@ public struct SwappableSensorField: SensorField {
         self.delayBuffer = SampleDelayBuffer(delaySteps: 0)
         let channelCount = stateChannelStore == nil ? 6 : 8
         self.noiseModels = (0..<channelCount).map { GaussianNoise(stdDev: 1.0, seed: seed &+ UInt64($0 + 1)) }
+        self.filterState = Array(repeating: nil, count: channelCount)
     }
 
     public mutating func sample(time: WorldTime) throws -> [ChannelSample] {
@@ -91,11 +95,28 @@ public struct SwappableSensorField: SensorField {
                 noiseModels[idx].stdDev = extraStd
                 value += noiseModels[idx].sample()
             }
+            value = applyBandwidth(channelIndex: idx, value: value, bandwidthScale: channelMods.bandwidthScale)
 
             updated.append(try ChannelSample(channelIndex: sample.channelIndex, value: value, timestamp: sample.timestamp))
         }
 
         return delayBuffer.push(updated)
+    }
+
+    /// First-order low-pass: `y[n] = y[n-1] + alpha * (x[n] - y[n-1])` with `alpha = bandwidthScale`.
+    /// `bandwidthScale == 1.0` passes the signal through unchanged.
+    private mutating func applyBandwidth(channelIndex idx: Int, value: Double, bandwidthScale: Double) -> Double {
+        if idx >= filterState.count {
+            filterState.append(contentsOf: Array(repeating: Double?.none, count: idx - filterState.count + 1))
+        }
+        if bandwidthScale >= 1.0 {
+            filterState[idx] = value
+            return value
+        }
+        let previous = filterState[idx] ?? value
+        let filtered = previous + bandwidthScale * (value - previous)
+        filterState[idx] = filtered
+        return filtered
     }
 
     private func extraNoiseStdDev(channelIndex: Int, noiseScale: Double) -> Double {
@@ -127,6 +148,7 @@ public struct SwappableSensorField: SensorField {
                 modifiers.channel[idx].gainScale *= sensor.gainScale
                 modifiers.channel[idx].biasShift += sensor.biasShift
                 modifiers.channel[idx].noiseScale *= sensor.noiseScale
+                modifiers.channel[idx].bandwidthScale *= sensor.bandwidthScale
                 modifiers.channel[idx].dropoutProbability = combineDropout(
                     modifiers.channel[idx].dropoutProbability,
                     sensor.dropoutProbability
@@ -171,6 +193,7 @@ public struct SwappableSensorField: SensorField {
         var biasShift: Double = 0.0
         var noiseScale: Double = 1.0
         var dropoutProbability: Double = 0.0
+        var bandwidthScale: Double = 1.0
     }
 
     private struct Modifiers {
