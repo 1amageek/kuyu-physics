@@ -11,8 +11,25 @@ public struct KuyuBodyModel: Sendable, Codable, Equatable {
     public let links: [LinkDefinition]
     public let joints: [JointDefinition]
     public let materials: [BodyMaterial]
+    public let actuatorMounts: [ActuatorMount]
     public let actuatorAttachments: [ActuatorAttachment]
     public let sensorMounts: [SensorMount]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case bodyID
+        case name
+        case category
+        case provenance
+        case units
+        case frames
+        case links
+        case joints
+        case materials
+        case actuatorMounts
+        case actuatorAttachments
+        case sensorMounts
+    }
 
     public init(
         schemaVersion: String,
@@ -25,6 +42,7 @@ public struct KuyuBodyModel: Sendable, Codable, Equatable {
         links: [LinkDefinition],
         joints: [JointDefinition],
         materials: [BodyMaterial] = [],
+        actuatorMounts: [ActuatorMount] = [],
         actuatorAttachments: [ActuatorAttachment] = [],
         sensorMounts: [SensorMount] = []
     ) {
@@ -38,8 +56,29 @@ public struct KuyuBodyModel: Sendable, Codable, Equatable {
         self.links = links
         self.joints = joints
         self.materials = materials
+        self.actuatorMounts = actuatorMounts
         self.actuatorAttachments = actuatorAttachments
         self.sensorMounts = sensorMounts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try container.decode(String.self, forKey: .schemaVersion)
+        self.bodyID = try container.decode(String.self, forKey: .bodyID)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.category = try container.decode(String.self, forKey: .category)
+        self.provenance = try container.decodeIfPresent([ModelProvenance].self, forKey: .provenance) ?? []
+        self.units = try container.decodeIfPresent(UnitDeclaration.self, forKey: .units) ?? .si
+        self.frames = try container.decodeIfPresent([FrameDefinition].self, forKey: .frames) ?? []
+        self.links = try container.decode([LinkDefinition].self, forKey: .links)
+        self.joints = try container.decode([JointDefinition].self, forKey: .joints)
+        self.materials = try container.decodeIfPresent([BodyMaterial].self, forKey: .materials) ?? []
+        self.actuatorMounts = try container.decodeIfPresent([ActuatorMount].self, forKey: .actuatorMounts) ?? []
+        self.actuatorAttachments = try container.decodeIfPresent(
+            [ActuatorAttachment].self,
+            forKey: .actuatorAttachments
+        ) ?? []
+        self.sensorMounts = try container.decodeIfPresent([SensorMount].self, forKey: .sensorMounts) ?? []
     }
 }
 
@@ -225,11 +264,15 @@ public struct JointDefinition: Sendable, Codable, Equatable {
     public let upperLimit: Double?
     public let effortLimit: Double?
     public let velocityLimit: Double?
+    public let softLowerLimit: Double?
+    public let softUpperLimit: Double?
+    public let homePosition: Double?
     public let damping: Double
     public let coulombFriction: Double
     public let stiction: Double
     public let backlash: Double
     public let compliance: ComplianceModel?
+    public let mimic: JointMimic?
 
     public init(
         id: String,
@@ -242,11 +285,15 @@ public struct JointDefinition: Sendable, Codable, Equatable {
         upperLimit: Double? = nil,
         effortLimit: Double? = nil,
         velocityLimit: Double? = nil,
+        softLowerLimit: Double? = nil,
+        softUpperLimit: Double? = nil,
+        homePosition: Double? = nil,
         damping: Double = 0,
         coulombFriction: Double = 0,
         stiction: Double = 0,
         backlash: Double = 0,
-        compliance: ComplianceModel? = nil
+        compliance: ComplianceModel? = nil,
+        mimic: JointMimic? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -258,12 +305,65 @@ public struct JointDefinition: Sendable, Codable, Equatable {
         self.upperLimit = upperLimit
         self.effortLimit = effortLimit
         self.velocityLimit = velocityLimit
+        self.softLowerLimit = softLowerLimit
+        self.softUpperLimit = softUpperLimit
+        self.homePosition = homePosition
         self.damping = damping
         self.coulombFriction = coulombFriction
         self.stiction = stiction
         self.backlash = backlash
         self.compliance = compliance
+        self.mimic = mimic
     }
+}
+
+public struct JointMimic: Sendable, Codable, Equatable {
+    public let jointID: String
+    public let multiplier: Double
+    public let offset: Double
+
+    public init(jointID: String, multiplier: Double = 1, offset: Double = 0) {
+        self.jointID = jointID
+        self.multiplier = multiplier
+        self.offset = offset
+    }
+}
+
+public struct ActuatorMount: Sendable, Codable, Equatable {
+    public let actuatorID: String
+    public let parentLinkID: String
+    public let frameID: String
+    public let pose: KuyuPose
+    public let outputAxis: KuyuVector3
+    public let housing: GeometryInstance?
+    public let source: String?
+    public let notes: String?
+
+    public init(
+        actuatorID: String,
+        parentLinkID: String,
+        frameID: String,
+        pose: KuyuPose,
+        outputAxis: KuyuVector3,
+        housing: GeometryInstance? = nil,
+        source: String? = nil,
+        notes: String? = nil
+    ) {
+        self.actuatorID = actuatorID
+        self.parentLinkID = parentLinkID
+        self.frameID = frameID
+        self.pose = pose
+        self.outputAxis = outputAxis
+        self.housing = housing
+        self.source = source
+        self.notes = notes
+    }
+}
+
+public enum TransmissionKind: String, Sendable, Codable, Equatable {
+    case direct
+    case timingPulley
+    case linkage
 }
 
 public struct ActuatorAttachment: Sendable, Codable, Equatable {
@@ -271,17 +371,41 @@ public struct ActuatorAttachment: Sendable, Codable, Equatable {
     public let jointID: String
     public let transmissionRatio: Double
     public let torqueLimit: Double
+    public let mountFrameID: String?
+    public let transmissionKind: TransmissionKind
+    public let mechanicalReductionRatio: Double
+    public let commandDirection: Double
+    public let actuatorZeroOffset: Double
+    public let jointZeroOffset: Double
+    public let efficiency: Double?
+    public let reflectedInertia: Double?
 
     public init(
         actuatorID: String,
         jointID: String,
         transmissionRatio: Double = 1,
-        torqueLimit: Double
+        torqueLimit: Double,
+        mountFrameID: String? = nil,
+        transmissionKind: TransmissionKind = .direct,
+        mechanicalReductionRatio: Double = 1,
+        commandDirection: Double = 1,
+        actuatorZeroOffset: Double = 0,
+        jointZeroOffset: Double = 0,
+        efficiency: Double? = nil,
+        reflectedInertia: Double? = nil
     ) {
         self.actuatorID = actuatorID
         self.jointID = jointID
         self.transmissionRatio = transmissionRatio
         self.torqueLimit = torqueLimit
+        self.mountFrameID = mountFrameID
+        self.transmissionKind = transmissionKind
+        self.mechanicalReductionRatio = mechanicalReductionRatio
+        self.commandDirection = commandDirection
+        self.actuatorZeroOffset = actuatorZeroOffset
+        self.jointZeroOffset = jointZeroOffset
+        self.efficiency = efficiency
+        self.reflectedInertia = reflectedInertia
     }
 }
 

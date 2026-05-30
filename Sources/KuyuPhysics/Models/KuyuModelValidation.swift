@@ -24,8 +24,17 @@ public extension KuyuBodyModel {
         }
 
         var linkIDs: Set<String> = []
-        let frameIDs = Set(frames.map(\.id))
+        var frameIDs: Set<String> = []
         let materialIDs = Set(materials.map(\.id))
+        for frame in frames {
+            if frame.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw KuyuModelValidationError.empty("body.frames.id")
+            }
+            if !frameIDs.insert(frame.id).inserted {
+                throw KuyuModelValidationError.duplicate("body.frames.\(frame.id)")
+            }
+            try validatePose(frame.pose, field: "body.frames.\(frame.id).pose")
+        }
         for link in links {
             if link.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 throw KuyuModelValidationError.empty("body.links.id")
@@ -73,12 +82,84 @@ public extension KuyuBodyModel {
             if let lower = joint.lowerLimit, let upper = joint.upperLimit, lower > upper {
                 throw KuyuModelValidationError.invalidRange("body.joints.\(joint.id).limits")
             }
+            if let softLower = joint.softLowerLimit, let softUpper = joint.softUpperLimit, softLower > softUpper {
+                throw KuyuModelValidationError.invalidRange("body.joints.\(joint.id).softLimits")
+            }
+            if let lower = joint.lowerLimit, let softLower = joint.softLowerLimit, softLower < lower {
+                throw KuyuModelValidationError.invalidRange("body.joints.\(joint.id).softLowerLimit")
+            }
+            if let upper = joint.upperLimit, let softUpper = joint.softUpperLimit, softUpper > upper {
+                throw KuyuModelValidationError.invalidRange("body.joints.\(joint.id).softUpperLimit")
+            }
+            if let home = joint.homePosition {
+                try validateFinite(home, "body.joints.\(joint.id).homePosition")
+                if let lower = joint.lowerLimit, home < lower {
+                    throw KuyuModelValidationError.invalidRange("body.joints.\(joint.id).homePosition")
+                }
+                if let upper = joint.upperLimit, home > upper {
+                    throw KuyuModelValidationError.invalidRange("body.joints.\(joint.id).homePosition")
+                }
+            }
             try validateOptionalNonNegative(joint.effortLimit, "body.joints.\(joint.id).effortLimit")
             try validateOptionalNonNegative(joint.velocityLimit, "body.joints.\(joint.id).velocityLimit")
             try validateNonNegative(joint.damping, "body.joints.\(joint.id).damping")
             try validateNonNegative(joint.coulombFriction, "body.joints.\(joint.id).coulombFriction")
             try validateNonNegative(joint.stiction, "body.joints.\(joint.id).stiction")
             try validateNonNegative(joint.backlash, "body.joints.\(joint.id).backlash")
+        }
+        for joint in joints {
+            guard let mimic = joint.mimic else { continue }
+            if mimic.jointID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw KuyuModelValidationError.empty("body.joints.\(joint.id).mimic.jointID")
+            }
+            if mimic.jointID == joint.id {
+                throw KuyuModelValidationError.invalidRange("body.joints.\(joint.id).mimic.self")
+            }
+            if !jointIDs.contains(mimic.jointID) {
+                throw KuyuModelValidationError.unknownReference("body.joints.\(joint.id).mimic.\(mimic.jointID)")
+            }
+            try validateFinite(mimic.multiplier, "body.joints.\(joint.id).mimic.multiplier")
+            try validateFinite(mimic.offset, "body.joints.\(joint.id).mimic.offset")
+        }
+
+        let bodyFrameIDs = frameIDs.union(linkIDs)
+        for frame in frames {
+            if let parentID = frame.parentID, !bodyFrameIDs.contains(parentID) {
+                throw KuyuModelValidationError.unknownReference("body.frames.\(frame.id).parentID")
+            }
+        }
+
+        var mountActuatorIDs: Set<String> = []
+        var mountFrameIDs: Set<String> = []
+        for mount in actuatorMounts {
+            if mount.actuatorID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw KuyuModelValidationError.empty("body.actuatorMounts.actuatorID")
+            }
+            if mount.frameID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw KuyuModelValidationError.empty("body.actuatorMounts.frameID")
+            }
+            if !mountActuatorIDs.insert(mount.actuatorID).inserted {
+                throw KuyuModelValidationError.duplicate("body.actuatorMounts.actuatorID.\(mount.actuatorID)")
+            }
+            if !mountFrameIDs.insert(mount.frameID).inserted {
+                throw KuyuModelValidationError.duplicate("body.actuatorMounts.frameID.\(mount.frameID)")
+            }
+            if !linkIDs.contains(mount.parentLinkID) {
+                throw KuyuModelValidationError.unknownReference("body.actuatorMounts.\(mount.actuatorID).parentLinkID")
+            }
+            if !bodyFrameIDs.contains(mount.frameID) {
+                throw KuyuModelValidationError.unknownReference("body.actuatorMounts.\(mount.actuatorID).frameID")
+            }
+            try validatePose(mount.pose, field: "body.actuatorMounts.\(mount.actuatorID).pose")
+            try validateFinite(mount.outputAxis.x, "body.actuatorMounts.\(mount.actuatorID).outputAxis.x")
+            try validateFinite(mount.outputAxis.y, "body.actuatorMounts.\(mount.actuatorID).outputAxis.y")
+            try validateFinite(mount.outputAxis.z, "body.actuatorMounts.\(mount.actuatorID).outputAxis.z")
+            if vectorMagnitude(mount.outputAxis) <= 0 {
+                throw KuyuModelValidationError.invalidRange("body.actuatorMounts.\(mount.actuatorID).outputAxis")
+            }
+            if let housing = mount.housing {
+                try validateGeometry(housing, field: "body.actuatorMounts.\(mount.actuatorID).housing")
+            }
         }
 
         var attachmentJointIDs: Set<String> = []
@@ -98,9 +179,25 @@ public extension KuyuBodyModel {
             }
             try validatePositive(attachment.transmissionRatio, "body.actuatorAttachments.transmissionRatio")
             try validatePositive(attachment.torqueLimit, "body.actuatorAttachments.torqueLimit")
+            if let mountFrameID = attachment.mountFrameID, !bodyFrameIDs.contains(mountFrameID) {
+                throw KuyuModelValidationError.unknownReference("body.actuatorAttachments.\(attachment.actuatorID).mountFrameID")
+            }
+            try validatePositive(attachment.mechanicalReductionRatio, "body.actuatorAttachments.mechanicalReductionRatio")
+            try validateFinite(attachment.commandDirection, "body.actuatorAttachments.commandDirection")
+            if attachment.commandDirection == 0 {
+                throw KuyuModelValidationError.invalidRange("body.actuatorAttachments.commandDirection")
+            }
+            try validateFinite(attachment.actuatorZeroOffset, "body.actuatorAttachments.actuatorZeroOffset")
+            try validateFinite(attachment.jointZeroOffset, "body.actuatorAttachments.jointZeroOffset")
+            if let efficiency = attachment.efficiency {
+                try validatePositive(efficiency, "body.actuatorAttachments.efficiency")
+                if efficiency > 1 {
+                    throw KuyuModelValidationError.invalidRange("body.actuatorAttachments.efficiency")
+                }
+            }
+            try validateOptionalNonNegative(attachment.reflectedInertia, "body.actuatorAttachments.reflectedInertia")
         }
 
-        let bodyFrameIDs = frameIDs.union(linkIDs)
         for mount in sensorMounts {
             if mount.sensorID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 throw KuyuModelValidationError.empty("body.sensorMounts.sensorID")
@@ -163,7 +260,8 @@ public struct ReadinessGate: Sendable {
         world: KuyuWorldModel,
         embodiment: EmbodimentContract,
         report: CompatibilityReport?,
-        requiredLevel: ReadinessLevel
+        requiredLevel: ReadinessLevel,
+        hardwareReport: HardwareCalibrationReport? = nil
     ) throws -> ReadinessLevel {
         try body.validate()
         try world.validate()
@@ -173,7 +271,8 @@ public struct ReadinessGate: Sendable {
             if report.hasUnsupportedMappings {
                 throw KuyuModelValidationError.unsupportedReadiness("compatibility.unsupported")
             }
-            if report.readinessLevel < requiredLevel {
+            let compatibilityRequiredLevel = requiredLevel == .hardwareParity ? .dynamicSimulation : requiredLevel
+            if report.readinessLevel < compatibilityRequiredLevel {
                 throw KuyuModelValidationError.unsupportedReadiness("compatibility.\(report.readinessLevel.rawValue)")
             }
         }
@@ -192,7 +291,16 @@ public struct ReadinessGate: Sendable {
             try requireContactTraining(body: body, world: world)
             return .contactTraining
         case .hardwareParity:
-            throw KuyuModelValidationError.unsupportedReadiness("hardwareParity")
+            try requireDynamic(body: body, world: world, embodiment: embodiment)
+            guard let hardwareReport else {
+                throw KuyuModelValidationError.empty("hardwareParity.report")
+            }
+            do {
+                try hardwareReport.validateHardwareParity(body: body, embodiment: embodiment)
+            } catch {
+                throw KuyuModelValidationError.unsupportedReadiness("hardwareParity.\(String(describing: error))")
+            }
+            return .hardwareParity
         }
     }
 
@@ -226,7 +334,9 @@ public struct ReadinessGate: Sendable {
         if body.actuatorAttachments.isEmpty {
             throw KuyuModelValidationError.empty("readiness.dynamic.actuatorAttachments")
         }
-        let movableJointIDs = Set(body.joints.filter { $0.kind == .revolute || $0.kind == .continuous || $0.kind == .prismatic }.map(\.id))
+        let movableJointIDs = Set(body.joints.filter { joint in
+            joint.mimic == nil && (joint.kind == .revolute || joint.kind == .continuous || joint.kind == .prismatic)
+        }.map(\.id))
         let attachedJointIDs = Set(body.actuatorAttachments.map(\.jointID))
         if movableJointIDs != attachedJointIDs {
             throw KuyuModelValidationError.unknownReference("readiness.dynamic.actuatorAttachments.coverage")
@@ -242,6 +352,12 @@ public struct ReadinessGate: Sendable {
         for attachment in body.actuatorAttachments {
             guard let actuator = actuatorsByID[attachment.actuatorID] else {
                 throw KuyuModelValidationError.unknownReference("readiness.dynamic.actuatorAttachments.\(attachment.actuatorID)")
+            }
+            if attachment.mountFrameID == nil {
+                throw KuyuModelValidationError.empty("readiness.dynamic.actuatorAttachments.\(attachment.actuatorID).mountFrameID")
+            }
+            if !body.actuatorMounts.contains(where: { $0.actuatorID == attachment.actuatorID }) {
+                throw KuyuModelValidationError.empty("readiness.dynamic.actuatorMounts.\(attachment.actuatorID)")
             }
             if actuator.channels.count != 1 {
                 throw KuyuModelValidationError.invalidRange("readiness.dynamic.actuators.\(actuator.id).channels")
@@ -320,6 +436,19 @@ private func validateGeometry(_ geometry: GeometryInstance, field: String) throw
             throw KuyuModelValidationError.empty("\(field).meshPath")
         }
     }
+}
+
+private func validatePose(_ pose: KuyuPose, field: String) throws {
+    try validateFinite(pose.xyz.x, "\(field).xyz.x")
+    try validateFinite(pose.xyz.y, "\(field).xyz.y")
+    try validateFinite(pose.xyz.z, "\(field).xyz.z")
+    try validateFinite(pose.rpy.x, "\(field).rpy.x")
+    try validateFinite(pose.rpy.y, "\(field).rpy.y")
+    try validateFinite(pose.rpy.z, "\(field).rpy.z")
+}
+
+private func vectorMagnitude(_ vector: KuyuVector3) -> Double {
+    sqrt(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z)
 }
 
 private func validateInertia(_ inertia: KuyuInertiaTensor, field: String) throws {

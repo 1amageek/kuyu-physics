@@ -43,6 +43,8 @@ public struct URDFJoint: Sendable, Equatable {
     public let child: String
     public let origin: URDFPose
     public let axis: Axis3
+    public let limit: URDFJointLimit?
+    public let mimic: URDFJointMimic?
 
     public init(
         name: String,
@@ -50,7 +52,9 @@ public struct URDFJoint: Sendable, Equatable {
         parent: String,
         child: String,
         origin: URDFPose,
-        axis: Axis3
+        axis: Axis3,
+        limit: URDFJointLimit? = nil,
+        mimic: URDFJointMimic? = nil
     ) {
         self.name = name
         self.type = type
@@ -58,6 +62,8 @@ public struct URDFJoint: Sendable, Equatable {
         self.child = child
         self.origin = origin
         self.axis = axis
+        self.limit = limit
+        self.mimic = mimic
     }
 }
 
@@ -68,6 +74,32 @@ public enum URDFJointType: String, Sendable, Equatable {
     case planar
     case prismatic
     case revolute
+}
+
+public struct URDFJointLimit: Sendable, Equatable {
+    public let effort: Double?
+    public let lower: Double?
+    public let upper: Double?
+    public let velocity: Double?
+
+    public init(effort: Double? = nil, lower: Double? = nil, upper: Double? = nil, velocity: Double? = nil) {
+        self.effort = effort
+        self.lower = lower
+        self.upper = upper
+        self.velocity = velocity
+    }
+}
+
+public struct URDFJointMimic: Sendable, Equatable {
+    public let joint: String
+    public let multiplier: Double
+    public let offset: Double
+
+    public init(joint: String, multiplier: Double = 1, offset: Double = 0) {
+        self.joint = joint
+        self.multiplier = multiplier
+        self.offset = offset
+    }
 }
 
 public struct URDFPose: Sendable, Equatable {
@@ -137,6 +169,8 @@ private final class URDFKinematicXMLParser: NSObject, XMLParserDelegate {
         var child: String?
         var origin = URDFPose()
         var axis = Axis3(x: 1, y: 0, z: 0)
+        var limit: URDFJointLimit?
+        var mimic: URDFJointMimic?
     }
 
     private var links: [URDFLink] = []
@@ -220,6 +254,14 @@ private final class URDFKinematicXMLParser: NSObject, XMLParserDelegate {
                 if currentJoint != nil {
                     currentJoint?.axis = try parseAxis3(attributeDict["xyz"], field: "joint.axis.xyz")
                 }
+            case "limit":
+                if currentJoint != nil {
+                    currentJoint?.limit = try parseLimit(attributeDict)
+                }
+            case "mimic":
+                if currentJoint != nil {
+                    currentJoint?.mimic = try parseMimic(attributeDict)
+                }
             default:
                 break
             }
@@ -267,7 +309,9 @@ private final class URDFKinematicXMLParser: NSObject, XMLParserDelegate {
                 parent: parent,
                 child: child,
                 origin: draft.origin,
-                axis: draft.axis
+                axis: draft.axis,
+                limit: draft.limit,
+                mimic: draft.mimic
             ))
             currentJoint = nil
         default:
@@ -288,6 +332,27 @@ private final class URDFKinematicXMLParser: NSObject, XMLParserDelegate {
         let rpy = try attributes["rpy"].map { try parseAxis3($0, field: "origin.rpy") }
             ?? Axis3(x: 0, y: 0, z: 0)
         return URDFPose(xyz: xyz, rpy: rpy)
+    }
+
+    private func parseLimit(_ attributes: [String: String]) throws -> URDFJointLimit {
+        try URDFJointLimit(
+            effort: attributes["effort"].map { try parseDouble($0, field: "joint.limit.effort") },
+            lower: attributes["lower"].map { try parseDouble($0, field: "joint.limit.lower") },
+            upper: attributes["upper"].map { try parseDouble($0, field: "joint.limit.upper") },
+            velocity: attributes["velocity"].map { try parseDouble($0, field: "joint.limit.velocity") }
+        )
+    }
+
+    private func parseMimic(_ attributes: [String: String]) throws -> URDFJointMimic {
+        try URDFJointMimic(
+            joint: required(attributes["joint"], field: "joint.mimic.joint"),
+            multiplier: attributes["multiplier"].map {
+                try parseDouble($0, field: "joint.mimic.multiplier")
+            } ?? 1,
+            offset: attributes["offset"].map {
+                try parseDouble($0, field: "joint.mimic.offset")
+            } ?? 0
+        )
     }
 
     private func parseAxis3(_ value: String?, field: String) throws -> Axis3 {

@@ -29,6 +29,15 @@ import Testing
         <child link="link_1"/>
         <origin xyz="0 0 0.2" rpy="0 0 0"/>
         <axis xyz="0 0 1"/>
+        <limit effort="2.0" lower="-1.0" upper="1.0" velocity="0.5"/>
+      </joint>
+      <joint name="joint_1_mimic" type="revolute">
+        <parent link="base_link"/>
+        <child link="link_1"/>
+        <origin xyz="0 0 0.2" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/>
+        <limit effort="2.0" lower="-1.0" upper="1.0" velocity="0.5"/>
+        <mimic joint="joint_1" multiplier="-1" offset="0.2"/>
       </joint>
     </robot>
     """
@@ -47,8 +56,11 @@ import Testing
     #expect(model.rootLinkNames == ["base_link"])
     #expect(model.links.count == 2)
     #expect(model.links[0].visuals.count == 1)
-    #expect(model.joints.count == 1)
+    #expect(model.joints.count == 2)
     #expect(model.joints[0].name == "joint_1")
     #expect(model.joints[0].parent == "base_link")
     #expect(model.joints[0].child == "link_1")
+    #expect(model.joints[0].limit == URDFJointLimit(effort: 2.0, lower: -1.0, upper: 1.0, velocity: 0.5))
+    #expect(model.joints[0].mimic == nil)
+    #expect(model.joints[1].mimic == URDFJointMimic(joint: "joint_1", multiplier: -1, offset: 0.2))
 }

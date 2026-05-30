@@ -67,7 +67,9 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             throw SimulationError.readinessFailed(String(describing: error))
         }
 
-        let movableJoints = request.body.joints.filter { $0.kind == .revolute || $0.kind == .continuous || $0.kind == .prismatic }
+        let movableJoints = request.body.joints.filter { joint in
+            joint.mimic == nil && (joint.kind == .revolute || joint.kind == .continuous || joint.kind == .prismatic)
+        }
         guard !movableJoints.isEmpty else {
             throw SimulationError.invalidBody("movable-joints")
         }
@@ -84,7 +86,7 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             embodiment: request.embodiment,
             actuatorSignals: actuatorSignals
         )
-        let jointRanges = try ranges(from: driveSignals)
+        let jointRanges = try ranges(from: driveSignals, bindings: jointBindings)
         let stateModel = ArticulatedStateModel(body: request.body, world: request.world)
         var state = ArticulatedState(
             position: Array(repeating: 0, count: jointBindings.count),
@@ -215,16 +217,29 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             guard let value = valuesBySignalID[binding.actuatorSignal.id] else {
                 throw SimulationError.invalidBody("actuator.value.\(binding.actuatorSignal.id)")
             }
-            return value / binding.attachment.transmissionRatio
+            return ((value - binding.attachment.actuatorZeroOffset) / binding.attachment.transmissionRatio)
+                + binding.attachment.jointZeroOffset
         }
     }
 
-    private func ranges(from signals: [SignalDefinition]) throws -> [ClosedRange<Double>] {
-        try signals.map { signal in
+    private func ranges(
+        from signals: [SignalDefinition],
+        bindings: [ArticulatedJointBinding]
+    ) throws -> [ClosedRange<Double>] {
+        try signals.enumerated().map { index, signal in
             guard let range = signal.range else {
                 throw SimulationError.missingJointRange(signal.id)
             }
-            return range.min...range.max
+            guard bindings.indices.contains(index) else {
+                return range.min...range.max
+            }
+            let joint = bindings[index].joint
+            let lower = max(range.min, joint.softLowerLimit ?? joint.lowerLimit ?? range.min)
+            let upper = min(range.max, joint.softUpperLimit ?? joint.upperLimit ?? range.max)
+            guard lower <= upper else {
+                throw SimulationError.missingJointRange(signal.id)
+            }
+            return lower...upper
         }
     }
 
@@ -234,11 +249,10 @@ public struct ArticulatedRigidBodySimulator: Sendable {
     ) -> [Double] {
         let frequency = 0.20
         return ranges.enumerated().map { index, range in
-            let positiveLimit = max(0.0, range.upperBound)
-            let negativeLimit = max(0.0, -range.lowerBound)
-            let amplitude = min(positiveLimit, negativeLimit) * 0.70
+            let center = (range.lowerBound + range.upperBound) * 0.5
+            let amplitude = (range.upperBound - range.lowerBound) * 0.5 * 0.70
             let phase = Double(index) * 0.7
-            return amplitude * sin((2.0 * Double.pi * frequency * time) + phase)
+            return center + amplitude * sin((2.0 * Double.pi * frequency * time) + phase)
         }
     }
 
@@ -333,7 +347,6 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             let signalID = binding.actuatorSignal.id
             scalars[signalID] = state.position[index]
             scalars[binding.joint.id] = state.position[index]
-            scalars["joint_\(index)"] = state.position[index]
             scalars["target_\(signalID)"] = targets.indices.contains(index) ? targets[index] : 0
             scalars["velocity_\(signalID)"] = state.velocity[index]
             scalars["torque_\(signalID)"] = state.torque[index]
@@ -444,7 +457,7 @@ private struct ArticulatedStateModel: Sendable {
             let current = state.position[index]
             let velocity = state.velocity[index]
             let target = targets.indices.contains(index) ? targets[index] : current
-            let effectiveInertia = inertia(for: joint)
+            let effectiveInertia = inertia(for: binding)
             let effortLimit = effortLimit(for: binding)
             try ensureFinite(current, "position[\(index)]")
             try ensureFinite(velocity, "velocity[\(index)]")
@@ -505,12 +518,19 @@ private struct ArticulatedStateModel: Sendable {
         return max(total, 1e-6)
     }
 
+    private func inertia(for binding: ArticulatedJointBinding) -> Double {
+        inertia(for: binding.joint) + (binding.attachment.reflectedInertia ?? 0)
+    }
+
     private func effortLimit(for binding: ArticulatedJointBinding) -> Double {
         let joint = binding.joint
         let jointLimit = joint.effortLimit ?? .greatestFiniteMagnitude
         let attachmentLimit = binding.attachment.torqueLimit
         let actuatorLimit = binding.actuator.dynamics?.torqueLimit ?? .greatestFiniteMagnitude
-        return max(min(jointLimit, attachmentLimit, actuatorLimit), 1e-6)
+        let transmissionLimit = actuatorLimit
+            * binding.attachment.mechanicalReductionRatio
+            * (binding.attachment.efficiency ?? 1.0)
+        return max(min(jointLimit, attachmentLimit, transmissionLimit), 1e-6)
     }
 
     private func gravityTorque(for joint: JointDefinition, position: Double) -> Double {

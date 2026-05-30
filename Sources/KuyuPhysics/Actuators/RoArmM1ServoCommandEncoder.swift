@@ -99,17 +99,27 @@ public struct RoArmM1ServoCommandEncoder: Sendable {
     }
 
     public static let jointCount = 5
-    public static let safeCommissioningJointLimits: [ClosedRange<Double>] = Array(
-        repeating: -0.261799...0.261799,
-        count: jointCount
-    )
+    public static let manufacturerJointLimits: [ClosedRange<Double>] = [
+        -3.14...3.14,
+        -1.0467...1.0467,
+        -2.7...2.7,
+        -2.1...2.1,
+        -1.57...0
+    ]
+    public static let safeCommissioningJointLimits: [ClosedRange<Double>] = [
+        -0.261799...0.261799,
+        -0.261799...0.261799,
+        -0.261799...0.261799,
+        -0.261799...0.261799,
+        -0.261799...0
+    ]
 
     private static let wavesharePi = 3.1415926
     private static let servoCenter = 2047
     private static let servoScale = 2048.0
     private static let pulseRange = 0...4095
-    private static let directions = [-1.0, -1.0, -1.0, 1.0, -1.0]
-    private static let multipliers = [1.0, 3.0, 1.0, 1.0, 1.0]
+    public static let commandDirections = [-1.0, -1.0, -1.0, 1.0, -1.0]
+    public static let mechanicalReductionRatios = [1.0, 3.0, 1.0, 1.0, 1.0]
 
     public let jointLimits: [ClosedRange<Double>]
     public let speed: Int
@@ -204,7 +214,13 @@ public struct RoArmM1ServoCommandEncoder: Sendable {
 
         let pulse = Int(
             Double(servoCenter)
-            + (directions[joint] * radians / wavesharePi * servoScale * multipliers[joint])
+            + (
+                commandDirections[joint]
+                * radians
+                / wavesharePi
+                * servoScale
+                * mechanicalReductionRatios[joint]
+            )
             + 0.5
         )
         guard pulseRange.contains(pulse) else {

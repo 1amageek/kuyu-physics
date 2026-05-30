@@ -33,6 +33,33 @@ import KuyuPhysics
               <geometry><box size="0.1 0.1 0.1"/></geometry>
             </visual>
           </link>
+          <link name="tip">
+            <inertial>
+              <origin xyz="0 0 0" rpy="0 0 0"/>
+              <mass value="0.5"/>
+              <inertia ixx="0.05" ixy="0" ixz="0" iyy="0.05" iyz="0" izz="0.05"/>
+            </inertial>
+          </link>
+          <link name="passive_tip">
+            <inertial>
+              <origin xyz="0 0 0" rpy="0 0 0"/>
+              <mass value="0.25"/>
+              <inertia ixx="0.025" ixy="0" ixz="0" iyy="0.025" iyz="0" izz="0.025"/>
+            </inertial>
+          </link>
+          <joint name="drive_joint" type="revolute">
+            <parent link="base"/>
+            <child link="tip"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-1" upper="1" effort="1" velocity="1"/>
+          </joint>
+          <joint name="passive_joint" type="revolute">
+            <parent link="base"/>
+            <child link="passive_tip"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-1" upper="1" effort="1" velocity="1"/>
+            <mimic joint="drive_joint" multiplier="-1" offset="0.1"/>
+          </joint>
         </robot>
         """
     )
@@ -40,8 +67,10 @@ import KuyuPhysics
     let result = try URDFBodyImporter().importBody(url: url, bodyID: "mini-body", category: "fixture")
 
     #expect(result.body.bodyID == "mini-body")
-    #expect(result.body.links.count == 1)
+    #expect(result.body.links.count == 3)
     #expect(result.body.links[0].mass == 1.0)
+    #expect(result.body.joints.count == 2)
+    #expect(result.body.joints[1].mimic == JointMimic(jointID: "drive_joint", multiplier: -1, offset: 0.1))
     #expect(result.report.mappings.contains { $0.status == .exact })
 }
 

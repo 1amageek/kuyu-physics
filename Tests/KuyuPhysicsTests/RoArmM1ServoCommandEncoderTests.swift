@@ -31,6 +31,8 @@ import KuyuPhysics
     #expect(command.positions == [1791, 1279, 1791, 2303, 1791])
     #expect(command.speeds == [12, 12, 12, 12, 12])
     #expect(command.accelerations == [34, 34, 34, 34, 34])
+    #expect(RoArmM1ServoCommandEncoder.commandDirections == [-1.0, -1.0, -1.0, 1.0, -1.0])
+    #expect(RoArmM1ServoCommandEncoder.mechanicalReductionRatios == [1.0, 3.0, 1.0, 1.0, 1.0])
 }
 
 @Test func roArmM1EncoderRejectsUnsafeTargetsBeforeSerialEncoding() async throws {
@@ -41,6 +43,13 @@ import KuyuPhysics
         #expect(Bool(false))
     } catch let error as RoArmM1ServoCommandEncoder.EncodingError {
         #expect(error == .outOfRange(joint: 2, value: 0.3, min: -0.261799, max: 0.261799))
+    }
+
+    do {
+        _ = try encoder.command(forRadians: [0.0, 0.0, 0.0, 0.0, 0.1])
+        #expect(Bool(false))
+    } catch let error as RoArmM1ServoCommandEncoder.EncodingError {
+        #expect(error == .outOfRange(joint: 5, value: 0.1, min: -0.261799, max: 0.0))
     }
 }
 

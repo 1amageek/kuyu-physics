@@ -240,6 +240,15 @@ private final class URDFBodyXMLParser: NSObject, XMLParserDelegate {
             currentJoint?.hasDynamics = true
             currentJoint?.damping = try parseOptionalDouble(attributes["damping"], field: "dynamics.damping") ?? 0
             currentJoint?.coulombFriction = try parseOptionalDouble(attributes["friction"], field: "dynamics.friction") ?? 0
+        case "mimic":
+            guard let jointID = attributes["joint"] else {
+                throw URDFBodyImporter.ImportError.parseFailed("mimic.joint")
+            }
+            currentJoint?.mimic = JointMimic(
+                jointID: jointID,
+                multiplier: try parseOptionalDouble(attributes["multiplier"], field: "mimic.multiplier") ?? 1,
+                offset: try parseOptionalDouble(attributes["offset"], field: "mimic.offset") ?? 0
+            )
         default:
             break
         }
@@ -407,6 +416,7 @@ private final class URDFBodyXMLParser: NSObject, XMLParserDelegate {
         var velocityLimit: Double?
         var damping: Double = 0
         var coulombFriction: Double = 0
+        var mimic: JointMimic?
 
         func build() throws -> JointDefinition {
             guard let parentLinkID, let childLinkID else {
@@ -427,7 +437,8 @@ private final class URDFBodyXMLParser: NSObject, XMLParserDelegate {
                 effortLimit: effortLimit,
                 velocityLimit: velocityLimit,
                 damping: damping,
-                coulombFriction: coulombFriction
+                coulombFriction: coulombFriction,
+                mimic: mimic
             )
         }
     }
