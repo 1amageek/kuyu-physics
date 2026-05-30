@@ -1,4 +1,5 @@
 import Foundation
+import EmbodimentContract
 import KuyuCore
 
 public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
@@ -13,26 +14,32 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
 
     public var lastTrace: MotorNerveTrace? { lastTraceStorage }
 
-    private let stages: [RobotDescriptor.MotorNerveStage]
+    private let stages: [MotorNerveStageDefinition]
     private let driveChannels: [String]
-    private let driveClamp: RobotDescriptor.Range?
-    private let driveLimits: [String: RobotDescriptor.Range]
-    private let actuatorSignals: [RobotDescriptor.SignalDefinition]
-    private let actuatorLimits: [String: RobotDescriptor.Range]
+    private let driveClamp: ScalarRange?
+    private let driveLimits: [String: ScalarRange]
+    private let actuatorSignals: [SignalDefinition]
+    private let actuatorLimits: [String: ScalarRange]
+    private let actuatorRateLimits: [String: Double]
     private let normalizedActuatorSignals: Set<String>
+    private var lastOutputBySignalID: [String: Double]
+    private var lastTime: Double?
     private var lastTraceStorage: MotorNerveTrace?
 
-    public init(descriptor: RobotDescriptor) throws {
-        self.stages = descriptor.motorNerve.stages
-        self.driveChannels = descriptor.control.driveChannels
-        self.driveClamp = descriptor.control.constraints?.driveClamp
-        self.driveLimits = Dictionary(uniqueKeysWithValues: descriptor.signals.drive.compactMap { signal in
+    public init(contract: EmbodimentContract) throws {
+        self.stages = contract.motorNerve.stages
+        self.driveChannels = contract.control.driveChannels
+        self.driveClamp = contract.control.constraints?.driveClamp
+        self.driveLimits = Dictionary(uniqueKeysWithValues: contract.signals.drive.compactMap { signal in
             guard let range = signal.range else { return nil }
             return (signal.id, range)
         })
-        self.actuatorSignals = descriptor.signals.actuator
-        self.actuatorLimits = MotorNerveChain.buildActuatorLimits(from: descriptor.actuators)
-        self.normalizedActuatorSignals = MotorNerveChain.normalizedActuatorOutputs(from: descriptor.motorNerve.stages)
+        self.actuatorSignals = contract.signals.actuator
+        self.actuatorLimits = MotorNerveChain.buildActuatorLimits(from: contract.actuators)
+        self.actuatorRateLimits = MotorNerveChain.buildActuatorRateLimits(from: contract.actuators)
+        self.normalizedActuatorSignals = MotorNerveChain.normalizedActuatorOutputs(from: contract.motorNerve.stages)
+        self.lastOutputBySignalID = [:]
+        self.lastTime = nil
         self.lastTraceStorage = nil
     }
 
@@ -89,8 +96,11 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
         rawOutputs.reserveCapacity(actuatorSignals.count)
         var saturated: [Double] = []
         saturated.reserveCapacity(actuatorSignals.count)
+        var rateLimited: [Double] = []
+        rateLimited.reserveCapacity(actuatorSignals.count)
         var finalValues: [ActuatorValue] = []
         finalValues.reserveCapacity(actuatorSignals.count)
+        let dt = max(0.0, time.time - (lastTime ?? time.time))
 
         for signal in actuatorSignals {
             guard let raw = values[signal.id] else {
@@ -98,17 +108,21 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
             }
             let scaled = scaleIfNeeded(signalId: signal.id, value: raw)
             let clamped = clampToLimits(signalId: signal.id, value: scaled)
-            let outputValue = telemetry.failsafeActive ? 0.0 : clamped
+            let limited = applyRateLimit(signalId: signal.id, value: clamped, dt: dt)
+            let outputValue = telemetry.failsafeActive ? 0.0 : limited
             rawOutputs.append(raw)
             saturated.append(clamped)
+            rateLimited.append(limited)
             let actuatorIndex = ActuatorIndex(UInt32(signal.index))
             finalValues.append(try ActuatorValue(index: actuatorIndex, value: outputValue))
+            lastOutputBySignalID[signal.id] = outputValue
         }
+        lastTime = time.time
 
         lastTraceStorage = MotorNerveTrace(
             uRaw: rawOutputs,
             uSat: saturated,
-            uRate: saturated,
+            uRate: rateLimited,
             uOut: finalValues.map(\.value),
             failsafeActive: telemetry.failsafeActive
         )
@@ -152,7 +166,7 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
         return try DriveIntent(index: drive.index, activation: value, parameters: drive.parameters)
     }
 
-    private func applyMatrix(stage: RobotDescriptor.MotorNerveStage, inputs: [Double]) throws -> [Double] {
+    private func applyMatrix(stage: MotorNerveStageDefinition, inputs: [Double]) throws -> [Double] {
         guard let mapping = stage.mapping, let matrix = mapping.matrix else {
             throw ChainError.invalidStageOutput(stage: stage.id)
         }
@@ -176,7 +190,7 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
         return outputs
     }
 
-    private func applyMixer(stage: RobotDescriptor.MotorNerveStage, inputs: [Double]) throws -> [Double] {
+    private func applyMixer(stage: MotorNerveStageDefinition, inputs: [Double]) throws -> [Double] {
         guard inputs.count == 4, stage.outputs.count == 4 else {
             throw ChainError.invalidMixerParameters(stage.id)
         }
@@ -184,7 +198,7 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
         let roll = inputs[1]
         let pitch = inputs[2]
         let yaw = inputs[3]
-        let spin = mixerSpin(stage: stage)
+        let spin = try mixerSpin(stage: stage)
         return [
             throttle - pitch + spin[0] * yaw,
             throttle + roll + spin[1] * yaw,
@@ -193,18 +207,20 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
         ]
     }
 
-    private func mixerSpin(stage: RobotDescriptor.MotorNerveStage) -> [Double] {
+    private func mixerSpin(stage: MotorNerveStageDefinition) throws -> [Double] {
         if let raw = stage.parameters?["spin"] {
             let parts = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             if parts.count == 4, let a = Double(parts[0]), let b = Double(parts[1]),
-               let c = Double(parts[2]), let d = Double(parts[3]) {
+               let c = Double(parts[2]), let d = Double(parts[3]),
+               a.isFinite, b.isFinite, c.isFinite, d.isFinite {
                 return [a, b, c, d]
             }
+            throw ChainError.invalidMixerParameters(stage.id)
         }
         return [1.0, -1.0, 1.0, -1.0]
     }
 
-    private func applyClip(stage: RobotDescriptor.MotorNerveStage, outputs: [Double]) -> [Double] {
+    private func applyClip(stage: MotorNerveStageDefinition, outputs: [Double]) -> [Double] {
         guard let clip = stage.mapping?.clip else { return outputs }
         return outputs.map { min(max($0, clip.min), clip.max) }
     }
@@ -223,12 +239,23 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
         return min(max(value, limits.min), limits.max)
     }
 
+    private mutating func applyRateLimit(signalId: String, value: Double, dt: Double) -> Double {
+        guard dt > 0.0, let rateLimit = actuatorRateLimits[signalId], rateLimit > 0.0 else {
+            return value
+        }
+        let previous = lastOutputBySignalID[signalId] ?? value
+        let maxDelta = rateLimit * dt
+        let delta = value - previous
+        let limited = min(max(delta, -maxDelta), maxDelta)
+        return previous + limited
+    }
+
     private static func buildActuatorLimits(
-        from actuators: [RobotDescriptor.ActuatorDefinition]
-    ) -> [String: RobotDescriptor.Range] {
-        var limits: [String: RobotDescriptor.Range] = [:]
+        from actuators: [ActuatorDefinition]
+    ) -> [String: ScalarRange] {
+        var limits: [String: ScalarRange] = [:]
         for actuator in actuators {
-            let range = RobotDescriptor.Range(min: actuator.limits.min, max: actuator.limits.max)
+            let range = ScalarRange(min: actuator.limits.min, max: actuator.limits.max)
             for channel in actuator.channels {
                 limits[channel] = range
             }
@@ -236,8 +263,20 @@ public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
         return limits
     }
 
+    private static func buildActuatorRateLimits(
+        from actuators: [ActuatorDefinition]
+    ) -> [String: Double] {
+        var rateLimits: [String: Double] = [:]
+        for actuator in actuators {
+            for channel in actuator.channels {
+                rateLimits[channel] = actuator.limits.rateLimitPerSecond
+            }
+        }
+        return rateLimits
+    }
+
     private static func normalizedActuatorOutputs(
-        from stages: [RobotDescriptor.MotorNerveStage]
+        from stages: [MotorNerveStageDefinition]
     ) -> Set<String> {
         var normalized: Set<String> = []
         for stage in stages where stage.type == .mixer {

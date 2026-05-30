@@ -15,12 +15,14 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../kuyu-core"),
+        .package(path: "../embodiment-contract"),
     ],
     targets: [
         .target(
             name: "KuyuPhysics",
             dependencies: [
                 .product(name: "KuyuCore", package: "kuyu-core"),
+                .product(name: "EmbodimentContract", package: "embodiment-contract"),
             ]
         ),
         .testTarget(
