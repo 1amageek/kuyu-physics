@@ -1,4 +1,3 @@
-import simd
 import KuyuCore
 
 public struct SinglePropPlantEngine: PlantEngine {
@@ -6,10 +5,14 @@ public struct SinglePropPlantEngine: PlantEngine {
         case nonFiniteState
     }
 
-    public var parameters: ReferenceQuadrotorParameters
+    public var parameters: ReferenceQuadrotorParameters {
+        didSet { model = Self.makeModel(parameters: parameters, environment: environment) }
+    }
     public var store: ReferenceQuadrotorWorldStore
     public let timeStep: TimeStep
     public let environment: WorldEnvironment
+    private var model: ReferenceQuadrotorPhysicsModel
+    private let integrator: ReferenceQuadrotorCanonicalIntegrator
 
     public init(
         parameters: ReferenceQuadrotorParameters,
@@ -21,33 +24,38 @@ public struct SinglePropPlantEngine: PlantEngine {
         self.store = store
         self.timeStep = timeStep
         self.environment = environment
+        self.model = Self.makeModel(parameters: parameters, environment: environment)
+        self.integrator = ReferenceQuadrotorCanonicalIntegrator()
     }
 
     public mutating func integrate(time: WorldTime) throws {
         _ = time
-        let gravity = environment.effectiveGravity(defaultGravity: parameters.gravity)
-        let thrust = store.motorThrusts.f1
-        let forceZ = thrust + store.disturbances.forceWorld.z
-        let accelZ = forceZ / parameters.mass - gravity
-
-        let dt = timeStep.delta
-        let nextVz = store.state.velocity.z + accelZ * dt
-        let nextZ = store.state.position.z + nextVz * dt
-
-        guard nextVz.isFinite, nextZ.isFinite else {
+        let next = try integrator.step(
+            state: store.state,
+            model: model,
+            motorThrusts: store.motorThrusts,
+            disturbances: store.disturbances,
+            fidelity: .singleProp,
+            delta: timeStep.delta
+        )
+        guard next.position.z.isFinite, next.velocity.z.isFinite else {
             throw PlantError.nonFiniteState
         }
 
-        let nextPosition = SIMD3<Double>(0.0, 0.0, nextZ)
-        let nextVelocity = SIMD3<Double>(0.0, 0.0, nextVz)
-        let nextOrientation = simd_quatd(angle: 0.0, axis: SIMD3<Double>(0, 0, 1))
-        let nextAngular = SIMD3<Double>(repeating: 0.0)
+        store.state = next
+    }
 
-        store.state = ReferenceQuadrotorState(
-            uncheckedPosition: nextPosition,
-            uncheckedVelocity: nextVelocity,
-            uncheckedOrientation: nextOrientation,
-            uncheckedAngularVelocity: nextAngular
+    private static func makeModel(
+        parameters: ReferenceQuadrotorParameters,
+        environment: WorldEnvironment
+    ) -> ReferenceQuadrotorPhysicsModel {
+        ReferenceQuadrotorPhysicsModel(
+            parameters: parameters,
+            mixer: ReferenceQuadrotorMixer(
+                armLength: parameters.armLength,
+                yawCoefficient: parameters.yawCoefficient
+            ),
+            environment: environment
         )
     }
 

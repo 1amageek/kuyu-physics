@@ -1,6 +1,7 @@
 import EmbodimentContract
 import Foundation
 import KuyuCore
+import simd
 
 public struct ArticulatedRigidBodySimulationRequest: Sendable, Equatable {
     public let body: KuyuBodyModel
@@ -276,7 +277,8 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             orientation: QuaternionSnapshot(w: 1.0, x: 0.0, y: 0.0, z: 0.0),
             angularVelocity: Axis3(x: 0.0, y: 0.0, z: 0.0)
         )
-        let scalars = scalarState(
+        let scalars = try scalarState(
+            body: body,
             bindings: bindings,
             state: state,
             targets: targets
@@ -301,7 +303,7 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             actuatorTelemetry: actuatorTelemetry(state: state, bindings: bindings, actuatorSignals: actuatorSignals),
             motorNerveTrace: motorNerveTrace,
             safetyTrace: try SafetyTrace(omegaMagnitude: state.velocity.map(abs).max() ?? 0.0, tiltRadians: 0.0),
-            plantState: PlantStateSnapshot(root: root, bodies: linkSnapshots(bindings: bindings, state: state), scalars: scalars),
+            plantState: PlantStateSnapshot(root: root, bodies: try linkSnapshots(body: body, scalars: scalars), scalars: scalars),
             disturbances: DisturbanceSnapshot(
                 forceWorld: Axis3(x: 0.0, y: 0.0, z: 0.0),
                 torqueBody: Axis3(
@@ -337,59 +339,208 @@ public struct ArticulatedRigidBodySimulator: Sendable {
     }
 
     private func scalarState(
+        body: KuyuBodyModel,
         bindings: [ArticulatedJointBinding],
         state: ArticulatedState,
         targets: [Double]
-    ) -> [String: Double] {
+    ) throws -> [String: Double] {
         var scalars: [String: Double] = [:]
+        var positionsByJointID: [String: Double] = [:]
+        var velocitiesByJointID: [String: Double] = [:]
+        var targetsByJointID: [String: Double] = [:]
+        var torquesByJointID: [String: Double] = [:]
         for index in state.position.indices {
             let binding = bindings[index]
             let signalID = binding.actuatorSignal.id
+            let target = targets.indices.contains(index) ? targets[index] : 0
+            positionsByJointID[binding.joint.id] = state.position[index]
+            velocitiesByJointID[binding.joint.id] = state.velocity[index]
+            targetsByJointID[binding.joint.id] = target
+            torquesByJointID[binding.joint.id] = state.torque[index]
             scalars[signalID] = state.position[index]
             scalars[binding.joint.id] = state.position[index]
-            scalars["target_\(signalID)"] = targets.indices.contains(index) ? targets[index] : 0
+            scalars["target_\(signalID)"] = target
+            scalars["target_\(binding.joint.id)"] = target
             scalars["velocity_\(signalID)"] = state.velocity[index]
+            scalars["velocity_\(binding.joint.id)"] = state.velocity[index]
             scalars["torque_\(signalID)"] = state.torque[index]
+            scalars["torque_\(binding.joint.id)"] = state.torque[index]
+        }
+
+        var unresolvedMimics = body.joints.filter { $0.mimic != nil }
+        while !unresolvedMimics.isEmpty {
+            var remaining: [JointDefinition] = []
+            var resolvedCount = 0
+
+            for joint in unresolvedMimics {
+                guard let mimic = joint.mimic,
+                      let masterPosition = positionsByJointID[mimic.jointID] else {
+                    remaining.append(joint)
+                    continue
+                }
+
+                let masterVelocity = velocitiesByJointID[mimic.jointID] ?? 0
+                let masterTarget = targetsByJointID[mimic.jointID] ?? masterPosition
+                let masterTorque = torquesByJointID[mimic.jointID] ?? 0
+                let position = masterPosition * mimic.multiplier + mimic.offset
+                let velocity = masterVelocity * mimic.multiplier
+                let target = masterTarget * mimic.multiplier + mimic.offset
+                let torque = masterTorque * mimic.multiplier
+
+                positionsByJointID[joint.id] = position
+                velocitiesByJointID[joint.id] = velocity
+                targetsByJointID[joint.id] = target
+                torquesByJointID[joint.id] = torque
+                scalars[joint.id] = position
+                scalars["target_\(joint.id)"] = target
+                scalars["velocity_\(joint.id)"] = velocity
+                scalars["torque_\(joint.id)"] = torque
+                resolvedCount += 1
+            }
+
+            if resolvedCount == 0 {
+                let ids = remaining.map(\.id).joined(separator: ",")
+                throw SimulationError.invalidBody("mimic.\(ids)")
+            }
+            unresolvedMimics = remaining
         }
         return scalars
     }
 
     private func linkSnapshots(
-        bindings: [ArticulatedJointBinding],
-        state: ArticulatedState
-    ) -> [RigidBodySnapshot] {
-        var cursor = Axis3(x: 0, y: 0, z: 0)
-        return bindings.enumerated().map { index, binding in
-            let joint = binding.joint
-            cursor = Axis3(
-                x: cursor.x + joint.origin.xyz.x,
-                y: cursor.y + joint.origin.xyz.y,
-                z: cursor.z + joint.origin.xyz.z
-            )
-            return RigidBodySnapshot(
-                id: joint.childLinkID,
-                position: cursor,
-                velocity: Axis3(x: 0, y: 0, z: 0),
-                orientation: approximateOrientation(axis: joint.axis, angle: state.position[index]),
-                angularVelocity: Axis3(
-                    x: joint.axis.x * state.velocity[index],
-                    y: joint.axis.y * state.velocity[index],
-                    z: joint.axis.z * state.velocity[index]
+        body: KuyuBodyModel,
+        scalars: [String: Double]
+    ) throws -> [RigidBodySnapshot] {
+        let childLinkIDs = Set(body.joints.map(\.childLinkID))
+        let rootLinks = body.links.filter { !childLinkIDs.contains($0.id) }
+        guard !rootLinks.isEmpty else {
+            throw SimulationError.invalidBody("root-link")
+        }
+        var statesByLinkID = Dictionary(
+            uniqueKeysWithValues: rootLinks.map { ($0.id, LinkKinematicState.identity) }
+        )
+        var snapshotsByChildLinkID: [String: RigidBodySnapshot] = [:]
+        snapshotsByChildLinkID.reserveCapacity(body.joints.count)
+        var unresolved = body.joints
+
+        while !unresolved.isEmpty {
+            var remaining: [JointDefinition] = []
+            var resolvedCount = 0
+
+            for joint in unresolved {
+                guard let parentState = statesByLinkID[joint.parentLinkID] else {
+                    remaining.append(joint)
+                    continue
+                }
+                let scalar = scalars[joint.id] ?? joint.homePosition ?? 0
+                let velocity = scalars["velocity_\(joint.id)"] ?? 0
+                let childState = try childLinkState(
+                    parent: parentState,
+                    joint: joint,
+                    scalar: scalar,
+                    velocity: velocity
                 )
+                statesByLinkID[joint.childLinkID] = childState
+                snapshotsByChildLinkID[joint.childLinkID] = RigidBodySnapshot(
+                    id: joint.childLinkID,
+                    position: axis3(childState.position),
+                    velocity: axis3(childState.velocity),
+                    orientation: QuaternionSnapshot(orientation: childState.orientation),
+                    angularVelocity: axis3(childState.angularVelocity)
+                )
+                resolvedCount += 1
+            }
+
+            if resolvedCount == 0 {
+                let ids = remaining.map(\.id).joined(separator: ",")
+                throw SimulationError.invalidBody("joint-topology.\(ids)")
+            }
+            unresolved = remaining
+        }
+
+        return body.joints.compactMap { snapshotsByChildLinkID[$0.childLinkID] }
+    }
+
+    private func childLinkState(
+        parent: LinkKinematicState,
+        joint: JointDefinition,
+        scalar: Double,
+        velocity: Double
+    ) throws -> LinkKinematicState {
+        let originTranslation = simdVector(joint.origin.xyz)
+        let originWorldOffset = parent.orientation.act(originTranslation)
+        let originPosition = parent.position + originWorldOffset
+        let originVelocity = parent.velocity + simd_cross(parent.angularVelocity, originWorldOffset)
+        let originOrientation = (parent.orientation * orientation(fromRPY: joint.origin.rpy)).normalizedQuat
+
+        switch joint.kind {
+        case .fixed:
+            return LinkKinematicState(
+                position: originPosition,
+                velocity: originVelocity,
+                orientation: originOrientation,
+                angularVelocity: parent.angularVelocity
+            )
+        case .revolute, .continuous:
+            let axis = try normalizedAxis(joint)
+            let worldAxis = originOrientation.act(axis)
+            return LinkKinematicState(
+                position: originPosition,
+                velocity: originVelocity,
+                orientation: (originOrientation * simd_quatd(angle: scalar, axis: axis)).normalizedQuat,
+                angularVelocity: parent.angularVelocity + worldAxis * velocity
+            )
+        case .prismatic:
+            let axis = try normalizedAxis(joint)
+            let worldAxis = originOrientation.act(axis)
+            let displacement = worldAxis * scalar
+            return LinkKinematicState(
+                position: originPosition + displacement,
+                velocity: originVelocity + simd_cross(parent.angularVelocity, displacement) + worldAxis * velocity,
+                orientation: originOrientation,
+                angularVelocity: parent.angularVelocity
             )
         }
     }
 
-    private func approximateOrientation(axis: KuyuVector3, angle: Double) -> QuaternionSnapshot {
-        let half = angle / 2.0
-        let sinHalf = sin(half)
-        return QuaternionSnapshot(
-            w: cos(half),
-            x: axis.x * sinHalf,
-            y: axis.y * sinHalf,
-            z: axis.z * sinHalf
-        )
+    private func normalizedAxis(_ joint: JointDefinition) throws -> SIMD3<Double> {
+        let axis = simdVector(joint.axis)
+        let length = simd_length(axis)
+        guard length > 0 else {
+            throw SimulationError.invalidBody("joint-axis.\(joint.id)")
+        }
+        return axis / length
     }
+
+    private func orientation(fromRPY rpy: KuyuVector3) -> simd_quatd {
+        let roll = simd_quatd(angle: rpy.x, axis: SIMD3<Double>(1, 0, 0))
+        let pitch = simd_quatd(angle: rpy.y, axis: SIMD3<Double>(0, 1, 0))
+        let yaw = simd_quatd(angle: rpy.z, axis: SIMD3<Double>(0, 0, 1))
+        return (yaw * pitch * roll).normalizedQuat
+    }
+
+    private func simdVector(_ vector: KuyuVector3) -> SIMD3<Double> {
+        SIMD3<Double>(vector.x, vector.y, vector.z)
+    }
+
+    private func axis3(_ vector: SIMD3<Double>) -> Axis3 {
+        Axis3(x: vector.x, y: vector.y, z: vector.z)
+    }
+
+}
+
+private struct LinkKinematicState: Sendable, Equatable {
+    var position: SIMD3<Double>
+    var velocity: SIMD3<Double>
+    var orientation: simd_quatd
+    var angularVelocity: SIMD3<Double>
+
+    static let identity = LinkKinematicState(
+        position: SIMD3<Double>(repeating: 0),
+        velocity: SIMD3<Double>(repeating: 0),
+        orientation: simd_quatd(angle: 0, axis: SIMD3<Double>(0, 0, 1)),
+        angularVelocity: SIMD3<Double>(repeating: 0)
+    )
 }
 
 private struct ArticulatedState: Sendable, Equatable {

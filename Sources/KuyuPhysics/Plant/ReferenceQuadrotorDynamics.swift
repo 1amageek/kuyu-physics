@@ -8,15 +8,26 @@ public struct ReferenceQuadrotorDynamics: Sendable {
         parameters: ReferenceQuadrotorParameters,
         gravity: Double
     ) -> ReferenceQuadrotorStateDerivative {
-        let gravityWorld = SIMD3<Double>(0, 0, -gravity)
+        let force = QuadrotorGeneralizedForce(
+            bodyForce: input.bodyForce,
+            bodyTorque: input.bodyTorque,
+            worldForce: input.worldForce
+        )
+            + ReferenceQuadrotorForceTerms.gravityForce(parameters: parameters, gravity: gravity)
+            + ReferenceQuadrotorForceTerms.gyroscopicForce(state: state, parameters: parameters)
+
+        return derivative(state: state, force: force, parameters: parameters)
+    }
+
+    public static func derivative(
+        state: ReferenceQuadrotorState,
+        force: QuadrotorGeneralizedForce,
+        parameters: ReferenceQuadrotorParameters
+    ) -> ReferenceQuadrotorStateDerivative {
         let inertia = parameters.inertiaSIMD
-
-        let forceWorld = state.orientation.act(input.bodyForce) + input.worldForce
-        let acceleration = (forceWorld / parameters.mass) + gravityWorld
-
-        let inertiaOmega = inertia * state.angularVelocity
-        let gyro = simd_cross(state.angularVelocity, inertiaOmega)
-        let angularAccel = (input.bodyTorque - gyro) / inertia
+        let forceWorld = state.orientation.act(force.bodyForce) + force.worldForce
+        let acceleration = forceWorld / parameters.mass
+        let angularAccel = force.bodyTorque / inertia
 
         let omegaQuat = simd_quatd(real: 0, imag: state.angularVelocity)
         let qDot = (state.orientation * omegaQuat).vector * 0.5
