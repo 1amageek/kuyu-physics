@@ -1,7 +1,7 @@
 import simd
 import KuyuCore
 
-public struct ImuRateDampingDriveCut: CutInterface {
+public struct ImuRateDampingDriveCut: CutInterface, Sendable {
     public enum CutError: Error, Equatable {
         case invalidHoverThrust
         case invalidMaxThrust

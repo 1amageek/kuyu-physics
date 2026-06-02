@@ -1,6 +1,6 @@
 import KuyuCore
 
-public struct SinglePropHoverCut: CutInterface {
+public struct SinglePropHoverCut: CutInterface, Sendable {
     public enum CutError: Error, Equatable {
         case invalidHoverThrust
         case invalidMaxThrust
