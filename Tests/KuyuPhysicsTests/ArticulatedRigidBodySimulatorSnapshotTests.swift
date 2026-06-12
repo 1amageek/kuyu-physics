@@ -44,6 +44,32 @@ import Testing
     assertQuaternionApproximatelyEqual(tip.orientation, QuaternionSnapshot(orientation: expectedTipOrientation), tolerance: 1e-12)
 }
 
+@Test(.timeLimit(.minutes(1))) func articulatedSimulatorAcceptsExternalDriveProvider() async throws {
+    let body = articulatedSnapshotBody(
+        shoulderPosition: 0.2,
+        slidePosition: 0.4,
+        fixedRoll: 0.0
+    )
+    let request = ArticulatedRigidBodySimulationRequest(
+        body: body,
+        world: articulatedSnapshotWorld(),
+        embodiment: articulatedSnapshotEmbodiment(),
+        determinism: try DeterminismConfig(tier: .tier0),
+        duration: 0.02,
+        timeStep: try TimeStep(delta: 0.01)
+    )
+
+    let log = try await ArticulatedRigidBodySimulator().run(
+        request: request,
+        driveProvider: FixedArticulatedDriveProvider(activations: [0.4, 0.2])
+    )
+    let first = try #require(log.events.first)
+
+    #expect(log.configHash.contains("fixed-articulated-drive-provider"))
+    #expect(first.driveIntents.map(\.activation) == [0.4, 0.2])
+    #expect(first.driveIntents.map { Int($0.index.rawValue) } == [0, 1])
+}
+
 private func articulatedSnapshotBody(
     shoulderPosition: Double,
     slidePosition: Double,
@@ -246,4 +272,20 @@ private func assertQuaternionApproximatelyEqual(
     tolerance: Double
 ) {
     #expect(abs(abs(lhs.dot(rhs)) - 1.0) < tolerance)
+}
+
+private struct FixedArticulatedDriveProvider: ArticulatedRigidBodyDriveProvider {
+    let providerID = "fixed-articulated-drive-provider"
+    let activations: [Double]
+
+    mutating func driveIntents(context: ArticulatedRigidBodyDriveContext) throws -> [DriveIntent] {
+        guard context.jointIDs.count == activations.count else {
+            throw ArticulatedRigidBodySimulator.SimulationError.invalidDriveProviderOutput(
+                "test-drive-count expected=\(context.jointIDs.count) actual=\(activations.count)"
+            )
+        }
+        return try activations.enumerated().map { index, value in
+            try DriveIntent(index: DriveIndex(UInt32(index)), activation: value)
+        }
+    }
 }

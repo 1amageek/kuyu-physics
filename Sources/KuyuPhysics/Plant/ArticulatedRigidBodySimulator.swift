@@ -41,6 +41,7 @@ public struct ArticulatedRigidBodySimulator: Sendable {
     public enum SimulationError: Error, Equatable {
         case invalidDuration(Double)
         case invalidBody(String)
+        case invalidDriveProviderOutput(String)
         case missingJointRange(String)
         case nonFiniteState(String)
         case readinessFailed(String)
@@ -50,6 +51,20 @@ public struct ArticulatedRigidBodySimulator: Sendable {
 
     public func run(
         request: ArticulatedRigidBodySimulationRequest,
+        control: SimulationControl? = nil,
+        telemetry: WorldStepTelemetry? = nil
+    ) async throws -> SimulationLog {
+        return try await run(
+            request: request,
+            driveProvider: ArticulatedSineDriveProvider(),
+            control: control,
+            telemetry: telemetry
+        )
+    }
+
+    public func run<DriveProvider: ArticulatedRigidBodyDriveProvider>(
+        request: ArticulatedRigidBodySimulationRequest,
+        driveProvider: DriveProvider,
         control: SimulationControl? = nil,
         telemetry: WorldStepTelemetry? = nil
     ) async throws -> SimulationLog {
@@ -88,12 +103,23 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             actuatorSignals: actuatorSignals
         )
         let jointRanges = try ranges(from: driveSignals, bindings: jointBindings)
+        let jointIDs = jointBindings.map(\.joint.id)
+        let driveSignalIDs = driveSignals.map(\.id)
+        let actuatorSignalIDs = actuatorSignals.map(\.id)
+        var provider = driveProvider
+        try provider.reset(context: ArticulatedRigidBodyDriveProviderResetContext(
+            seed: request.seed,
+            jointIDs: jointIDs,
+            driveSignalIDs: driveSignalIDs,
+            jointRanges: jointRanges
+        ))
         let stateModel = ArticulatedStateModel(body: request.body, world: request.world)
         var state = ArticulatedState(
             position: Array(repeating: 0, count: jointBindings.count),
             velocity: Array(repeating: 0, count: jointBindings.count),
             torque: Array(repeating: 0, count: jointBindings.count)
         )
+        var targets = state.position
         let stepCount = Int((request.duration / request.timeStep.delta).rounded(.down))
         var logs: [WorldStepLog] = []
         logs.reserveCapacity(stepCount)
@@ -104,12 +130,19 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             }
 
             let time = try WorldTime(stepIndex: UInt64(step), time: Double(step) * request.timeStep.delta)
-            let drives = try trajectoryTargets(
-                time: time.time,
-                ranges: jointRanges
-            ).enumerated().map { index, value in
-                try DriveIntent(index: DriveIndex(UInt32(index)), activation: value)
-            }
+            let providerContext = ArticulatedRigidBodyDriveContext(
+                time: time,
+                jointIDs: jointIDs,
+                driveSignalIDs: driveSignalIDs,
+                actuatorSignalIDs: actuatorSignalIDs,
+                jointRanges: jointRanges,
+                positions: state.position,
+                velocities: state.velocity,
+                targets: targets,
+                torques: state.torque
+            )
+            let drives = try provider.driveIntents(context: providerContext)
+            try validateProviderDrives(drives, expectedCount: jointBindings.count)
             let actuatorValues = try motorNerve.update(
                 input: drives,
                 corrections: [],
@@ -120,7 +153,7 @@ public struct ArticulatedRigidBodySimulator: Sendable {
                 )),
                 time: time
             )
-            let targets = try jointTargets(values: actuatorValues, bindings: jointBindings, actuatorSignals: actuatorSignals)
+            targets = try jointTargets(values: actuatorValues, bindings: jointBindings, actuatorSignals: actuatorSignals)
             state = try stateModel.step(
                 state: state,
                 targets: targets,
@@ -154,7 +187,7 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             seed: request.seed,
             timeStep: request.timeStep,
             determinism: request.determinism,
-            configHash: "articulated-dynamic-v1-\(request.body.bodyID)-duration-\(request.duration)-dt-\(request.timeStep.delta)",
+            configHash: "articulated-dynamic-v2-\(request.body.bodyID)-duration-\(request.duration)-dt-\(request.timeStep.delta)-drive-\(provider.providerID)",
             events: logs
         )
     }
@@ -244,16 +277,21 @@ public struct ArticulatedRigidBodySimulator: Sendable {
         }
     }
 
-    private func trajectoryTargets(
-        time: Double,
-        ranges: [ClosedRange<Double>]
-    ) -> [Double] {
-        let frequency = 0.20
-        return ranges.enumerated().map { index, range in
-            let center = (range.lowerBound + range.upperBound) * 0.5
-            let amplitude = (range.upperBound - range.lowerBound) * 0.5 * 0.70
-            let phase = Double(index) * 0.7
-            return center + amplitude * sin((2.0 * Double.pi * frequency * time) + phase)
+    private func validateProviderDrives(_ drives: [DriveIntent], expectedCount: Int) throws {
+        guard drives.count == expectedCount else {
+            throw SimulationError.invalidDriveProviderOutput(
+                "drive-count expected=\(expectedCount) actual=\(drives.count)"
+            )
+        }
+        for (index, drive) in drives.enumerated() {
+            guard drive.index.rawValue == UInt32(index) else {
+                throw SimulationError.invalidDriveProviderOutput(
+                    "drive-index expected=\(index) actual=\(drive.index.rawValue)"
+                )
+            }
+            guard drive.activation.isFinite else {
+                throw SimulationError.nonFiniteState("drive[\(index)]")
+            }
         }
     }
 
