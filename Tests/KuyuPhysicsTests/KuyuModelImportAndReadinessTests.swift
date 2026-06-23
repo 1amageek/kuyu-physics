@@ -157,6 +157,144 @@ import KuyuPhysics
     }
 }
 
+@Test func bodyValidationRejectsDuplicateChildLinkTopology() throws {
+    let body = KuyuBodyModel(
+        schemaVersion: "1.0",
+        bodyID: "duplicate-child-body",
+        name: "Duplicate Child Body",
+        category: "fixture",
+        links: [
+            LinkDefinition(
+                id: "base",
+                mass: 1,
+                centerOfMass: KuyuVector3(x: 0, y: 0, z: 0),
+                inertia: KuyuInertiaTensor(ixx: 0.1, ixy: 0, ixz: 0, iyy: 0.1, iyz: 0, izz: 0.1)
+            ),
+            LinkDefinition(
+                id: "tip",
+                mass: 1,
+                centerOfMass: KuyuVector3(x: 0, y: 0, z: 0),
+                inertia: KuyuInertiaTensor(ixx: 0.1, ixy: 0, ixz: 0, iyy: 0.1, iyz: 0, izz: 0.1)
+            )
+        ],
+        joints: [
+            JointDefinition(
+                id: "joint-a",
+                kind: .revolute,
+                parentLinkID: "base",
+                childLinkID: "tip",
+                origin: KuyuPose(),
+                axis: KuyuVector3(x: 0, y: 0, z: 1)
+            ),
+            JointDefinition(
+                id: "joint-b",
+                kind: .revolute,
+                parentLinkID: "base",
+                childLinkID: "tip",
+                origin: KuyuPose(),
+                axis: KuyuVector3(x: 0, y: 0, z: 1)
+            )
+        ]
+    )
+
+    #expect(throws: KuyuModelValidationError.duplicate("body.joints.childLinkID.tip")) {
+        try body.validate()
+    }
+}
+
+@Test func worldValidationRejectsPenaltyContactWithoutStiffness() throws {
+    let world = KuyuWorldModel(
+        schemaVersion: "1.0",
+        worldID: "invalid-contact-world",
+        time: TimeModel(fixedStepSeconds: 0.01),
+        integrator: IntegratorModel(kind: .semiImplicitEuler),
+        solver: SolverModel(kind: .deterministicConstraint, iterations: 20, tolerance: 1e-8),
+        gravity: .earthUniform,
+        atmosphere: AtmosphereModel(kind: .none),
+        wind: WindModel(kind: .none),
+        contact: ContactModel(mode: .penalty, damping: 10),
+        nap: NegligibilityApproximationPolicy(
+            forceAbsoluteThreshold: 0,
+            forceRelativeThreshold: 0,
+            torqueAbsoluteThreshold: 0,
+            torqueRelativeThreshold: 0
+        ),
+        randomness: RandomnessModel(seed: 0, deterministicReplay: true)
+    )
+
+    #expect(throws: KuyuModelValidationError.empty("world.contact.stiffness")) {
+        try world.validate()
+    }
+}
+
+@Test func worldValidationRejectsDynamicFrictionAboveStaticFriction() throws {
+    let world = KuyuWorldModel(
+        schemaVersion: "1.0",
+        worldID: "invalid-material-world",
+        time: TimeModel(fixedStepSeconds: 0.01),
+        integrator: IntegratorModel(kind: .semiImplicitEuler),
+        solver: SolverModel(kind: .disabledContact, iterations: 0, tolerance: 0),
+        gravity: .earthUniform,
+        atmosphere: AtmosphereModel(kind: .none),
+        wind: WindModel(kind: .none),
+        materials: [
+            WorldMaterial(id: "floor", staticFriction: 0.2, dynamicFriction: 0.4, restitution: 0)
+        ],
+        contact: ContactModel(mode: .disabled),
+        nap: NegligibilityApproximationPolicy(
+            forceAbsoluteThreshold: 0,
+            forceRelativeThreshold: 0,
+            torqueAbsoluteThreshold: 0,
+            torqueRelativeThreshold: 0
+        ),
+        randomness: RandomnessModel(seed: 0, deterministicReplay: true)
+    )
+
+    #expect(throws: KuyuModelValidationError.invalidRange("world.materials.floor.dynamicFriction")) {
+        try world.validate()
+    }
+}
+
+@Test func contactTrainingReadinessRequiresCompleteBodyContactMaterial() throws {
+    let gate = ReadinessGate()
+    let world = contactReadinessWorld()
+    let embodiment = contactReadinessEmbodiment()
+
+    #expect(throws: KuyuModelValidationError.empty("contactTraining.body.materials.rubber.staticFriction")) {
+        _ = try gate.validate(
+            body: contactReadinessBody(
+                material: BodyMaterial(id: "rubber", density: 1_000, dynamicFriction: 0.6, restitution: 0)
+            ),
+            world: world,
+            embodiment: embodiment,
+            report: nil,
+            requiredLevel: .contactTraining
+        )
+    }
+    #expect(throws: KuyuModelValidationError.empty("contactTraining.body.materials.rubber.dynamicFriction")) {
+        _ = try gate.validate(
+            body: contactReadinessBody(
+                material: BodyMaterial(id: "rubber", density: 1_000, staticFriction: 0.8, restitution: 0)
+            ),
+            world: world,
+            embodiment: embodiment,
+            report: nil,
+            requiredLevel: .contactTraining
+        )
+    }
+    #expect(throws: KuyuModelValidationError.empty("contactTraining.body.materials.rubber.restitution")) {
+        _ = try gate.validate(
+            body: contactReadinessBody(
+                material: BodyMaterial(id: "rubber", density: 1_000, staticFriction: 0.8, dynamicFriction: 0.6)
+            ),
+            world: world,
+            embodiment: embodiment,
+            report: nil,
+            requiredLevel: .contactTraining
+        )
+    }
+}
+
 @Test func kuyuModelLoaderRejectsMismatchedModelReferenceHash() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
         "kuyu-loader-hash-\(UUID().uuidString)",
@@ -278,6 +416,156 @@ private func minimalEmbodiment() -> EmbodimentContract {
             driveChannels: ["drive.joint"],
             reflexChannels: ["reflex.joint"]
         ),
+        motorNerve: MotorNerveContract(stages: [
+            MotorNerveStageDefinition(
+                id: "direct",
+                type: .direct,
+                inputs: ["drive.joint"],
+                outputs: ["actuator.joint"]
+            )
+        ])
+    )
+}
+
+private func contactReadinessBody(material: BodyMaterial) -> KuyuBodyModel {
+    KuyuBodyModel(
+        schemaVersion: "1.0",
+        bodyID: "contact-readiness-body",
+        name: "Contact Readiness Body",
+        category: "fixture",
+        frames: [
+            FrameDefinition(id: "joint-output", parentID: "base", pose: KuyuPose())
+        ],
+        links: [
+            LinkDefinition(
+                id: "base",
+                mass: 1,
+                centerOfMass: KuyuVector3(x: 0, y: 0, z: 0),
+                inertia: KuyuInertiaTensor(ixx: 0.1, ixy: 0, ixz: 0, iyy: 0.1, iyz: 0, izz: 0.1),
+                collisions: [
+                    GeometryInstance(
+                        id: "base-clearance",
+                        kind: .sphere,
+                        pose: KuyuPose(xyz: KuyuVector3(x: 0, y: 0, z: 1)),
+                        radius: 0.01
+                    )
+                ],
+                materialID: material.id
+            ),
+            LinkDefinition(
+                id: "tip",
+                mass: 0.5,
+                centerOfMass: KuyuVector3(x: 0, y: 0, z: 0),
+                inertia: KuyuInertiaTensor(ixx: 0.05, ixy: 0, ixz: 0, iyy: 0.05, iyz: 0, izz: 0.05),
+                collisions: [
+                    GeometryInstance(id: "tip-contact", kind: .sphere, radius: 0.05)
+                ],
+                materialID: material.id
+            )
+        ],
+        joints: [
+            JointDefinition(
+                id: "joint",
+                kind: .prismatic,
+                parentLinkID: "base",
+                childLinkID: "tip",
+                origin: KuyuPose(),
+                axis: KuyuVector3(x: 0, y: 0, z: 1),
+                lowerLimit: -1,
+                upperLimit: 1,
+                effortLimit: 10,
+                velocityLimit: 10,
+                homePosition: 0
+            )
+        ],
+        materials: [material],
+        actuatorMounts: [
+            ActuatorMount(
+                actuatorID: "joint-actuator",
+                parentLinkID: "base",
+                frameID: "joint-output",
+                pose: KuyuPose(),
+                outputAxis: KuyuVector3(x: 0, y: 0, z: 1)
+            )
+        ],
+        actuatorAttachments: [
+            ActuatorAttachment(
+                actuatorID: "joint-actuator",
+                jointID: "joint",
+                torqueLimit: 10,
+                mountFrameID: "joint-output"
+            )
+        ]
+    )
+}
+
+private func contactReadinessWorld() -> KuyuWorldModel {
+    KuyuWorldModel(
+        schemaVersion: "1.0",
+        worldID: "contact-readiness-world",
+        time: TimeModel(fixedStepSeconds: 0.01),
+        integrator: IntegratorModel(kind: .semiImplicitEuler),
+        solver: SolverModel(kind: .deterministicConstraint, iterations: 20, tolerance: 1e-8),
+        gravity: .earthUniform,
+        atmosphere: AtmosphereModel(kind: .none),
+        wind: WindModel(kind: .none),
+        surfaces: [
+            WorldSurface(
+                id: "floor",
+                frameID: "world",
+                materialID: "floor",
+                pose: KuyuPose(),
+                geometry: GeometryInstance(id: "floor-box", kind: .box, size: KuyuVector3(x: 10, y: 10, z: 0.05))
+            )
+        ],
+        materials: [
+            WorldMaterial(id: "floor", staticFriction: 0.7, dynamicFriction: 0.5, restitution: 0)
+        ],
+        contact: ContactModel(mode: .constraint),
+        nap: NegligibilityApproximationPolicy(
+            forceAbsoluteThreshold: 0,
+            forceRelativeThreshold: 0,
+            torqueAbsoluteThreshold: 0,
+            torqueRelativeThreshold: 0
+        ),
+        randomness: RandomnessModel(seed: 0, deterministicReplay: true)
+    )
+}
+
+private func contactReadinessEmbodiment() -> EmbodimentContract {
+    EmbodimentContract(
+        schemaVersion: "1.0",
+        contractID: "contact-readiness-embodiment",
+        bodyID: "contact-readiness-body",
+        signals: SignalCatalog(
+            sensor: [],
+            actuator: [
+                SignalDefinition(id: "actuator.joint", index: 0, name: "Joint actuator", units: "m")
+            ],
+            drive: [
+                SignalDefinition(
+                    id: "drive.joint",
+                    index: 0,
+                    name: "Joint drive",
+                    units: "m",
+                    range: ScalarRange(min: -1, max: 1)
+                )
+            ],
+            reflex: [
+                SignalDefinition(id: "reflex.joint", index: 0, name: "Joint reflex", units: "m")
+            ]
+        ),
+        sensors: [],
+        actuators: [
+            ActuatorDefinition(
+                id: "joint-actuator",
+                type: "linear-servo",
+                channels: ["actuator.joint"],
+                limits: ActuatorLimits(min: -1, max: 1, rateLimitPerSecond: 10),
+                dynamics: ActuatorDynamics(timeConstantSeconds: 0.001, deadzone: 0, torqueLimit: 10)
+            )
+        ],
+        control: ControlContract(driveChannels: ["drive.joint"], reflexChannels: ["reflex.joint"]),
         motorNerve: MotorNerveContract(stages: [
             MotorNerveStageDefinition(
                 id: "direct",

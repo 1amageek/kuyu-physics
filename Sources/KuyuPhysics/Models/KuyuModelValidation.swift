@@ -25,7 +25,24 @@ public extension KuyuBodyModel {
 
         var linkIDs: Set<String> = []
         var frameIDs: Set<String> = []
-        let materialIDs = Set(materials.map(\.id))
+        var materialIDs: Set<String> = []
+        for material in materials {
+            if material.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw KuyuModelValidationError.empty("body.materials.id")
+            }
+            if !materialIDs.insert(material.id).inserted {
+                throw KuyuModelValidationError.duplicate("body.materials.\(material.id)")
+            }
+            try validateOptionalPositive(material.density, "body.materials.\(material.id).density")
+            try validateOptionalNonNegative(material.staticFriction, "body.materials.\(material.id).staticFriction")
+            try validateOptionalNonNegative(material.dynamicFriction, "body.materials.\(material.id).dynamicFriction")
+            if let staticFriction = material.staticFriction,
+               let dynamicFriction = material.dynamicFriction,
+               dynamicFriction > staticFriction {
+                throw KuyuModelValidationError.invalidRange("body.materials.\(material.id).dynamicFriction")
+            }
+            try validateOptionalUnitInterval(material.restitution, "body.materials.\(material.id).restitution")
+        }
         for frame in frames {
             if frame.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 throw KuyuModelValidationError.empty("body.frames.id")
@@ -56,9 +73,13 @@ public extension KuyuBodyModel {
             for visual in link.visuals {
                 try validateGeometry(visual, field: "body.links.\(link.id).visuals")
             }
+            if let compliance = link.compliance {
+                try validateCompliance(compliance, field: "body.links.\(link.id).compliance")
+            }
         }
 
         var jointIDs: Set<String> = []
+        var childLinkIDs: Set<String> = []
         for joint in joints {
             if joint.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 throw KuyuModelValidationError.empty("body.joints.id")
@@ -72,6 +93,13 @@ public extension KuyuBodyModel {
             if !linkIDs.contains(joint.childLinkID) {
                 throw KuyuModelValidationError.unknownReference("body.joints.\(joint.id).childLinkID")
             }
+            if joint.parentLinkID == joint.childLinkID {
+                throw KuyuModelValidationError.invalidRange("body.joints.\(joint.id).selfLink")
+            }
+            if !childLinkIDs.insert(joint.childLinkID).inserted {
+                throw KuyuModelValidationError.duplicate("body.joints.childLinkID.\(joint.childLinkID)")
+            }
+            try validatePose(joint.origin, field: "body.joints.\(joint.id).origin")
             try validateFinite(joint.axis.x, "body.joints.\(joint.id).axis.x")
             try validateFinite(joint.axis.y, "body.joints.\(joint.id).axis.y")
             try validateFinite(joint.axis.z, "body.joints.\(joint.id).axis.z")
@@ -82,6 +110,10 @@ public extension KuyuBodyModel {
             if let lower = joint.lowerLimit, let upper = joint.upperLimit, lower > upper {
                 throw KuyuModelValidationError.invalidRange("body.joints.\(joint.id).limits")
             }
+            try validateOptionalFinite(joint.lowerLimit, "body.joints.\(joint.id).lowerLimit")
+            try validateOptionalFinite(joint.upperLimit, "body.joints.\(joint.id).upperLimit")
+            try validateOptionalFinite(joint.softLowerLimit, "body.joints.\(joint.id).softLowerLimit")
+            try validateOptionalFinite(joint.softUpperLimit, "body.joints.\(joint.id).softUpperLimit")
             if let softLower = joint.softLowerLimit, let softUpper = joint.softUpperLimit, softLower > softUpper {
                 throw KuyuModelValidationError.invalidRange("body.joints.\(joint.id).softLimits")
             }
@@ -106,7 +138,11 @@ public extension KuyuBodyModel {
             try validateNonNegative(joint.coulombFriction, "body.joints.\(joint.id).coulombFriction")
             try validateNonNegative(joint.stiction, "body.joints.\(joint.id).stiction")
             try validateNonNegative(joint.backlash, "body.joints.\(joint.id).backlash")
+            if let compliance = joint.compliance {
+                try validateCompliance(compliance, field: "body.joints.\(joint.id).compliance")
+            }
         }
+        try validateJointTopology(joints: joints)
         for joint in joints {
             guard let mimic = joint.mimic else { continue }
             if mimic.jointID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -184,7 +220,7 @@ public extension KuyuBodyModel {
             }
             try validatePositive(attachment.mechanicalReductionRatio, "body.actuatorAttachments.mechanicalReductionRatio")
             try validateFinite(attachment.commandDirection, "body.actuatorAttachments.commandDirection")
-            if attachment.commandDirection == 0 {
+            if abs(abs(attachment.commandDirection) - 1.0) > 1e-12 {
                 throw KuyuModelValidationError.invalidRange("body.actuatorAttachments.commandDirection")
             }
             try validateFinite(attachment.actuatorZeroOffset, "body.actuatorAttachments.actuatorZeroOffset")
@@ -205,6 +241,7 @@ public extension KuyuBodyModel {
             if !bodyFrameIDs.contains(mount.frameID) {
                 throw KuyuModelValidationError.unknownReference("body.sensorMounts.\(mount.sensorID).frameID")
             }
+            try validatePose(mount.pose, field: "body.sensorMounts.\(mount.sensorID).pose")
         }
     }
 }
@@ -228,6 +265,13 @@ public extension KuyuWorldModel {
         try validateFinite(gravity.acceleration.x, "world.gravity.acceleration.x")
         try validateFinite(gravity.acceleration.y, "world.gravity.acceleration.y")
         try validateFinite(gravity.acceleration.z, "world.gravity.acceleration.z")
+        try validateAtmosphere(atmosphere)
+        try validateFinite(wind.velocityWorld.x, "world.wind.velocityWorld.x")
+        try validateFinite(wind.velocityWorld.y, "world.wind.velocityWorld.y")
+        try validateFinite(wind.velocityWorld.z, "world.wind.velocityWorld.z")
+        try validateWorldMaterials(materials)
+        try validateWorldSurfaces(surfaces, materials: materials)
+        try validateContact(contact, solver: solver)
         try validateNonNegative(nap.forceAbsoluteThreshold, "world.nap.forceAbsoluteThreshold")
         try validateNonNegative(nap.forceRelativeThreshold, "world.nap.forceRelativeThreshold")
         try validateNonNegative(nap.torqueAbsoluteThreshold, "world.nap.torqueAbsoluteThreshold")
@@ -367,6 +411,36 @@ public struct ReadinessGate: Sendable {
                (joint?.lowerLimit == nil || joint?.upperLimit == nil) {
                 throw KuyuModelValidationError.empty("readiness.dynamic.joints.\(attachment.jointID).limits")
             }
+            if let joint {
+                try requireActuatorLimitsWithinJointEnvelope(
+                    actuator: actuator,
+                    attachment: attachment,
+                    joint: joint
+                )
+            }
+        }
+    }
+
+    private func requireActuatorLimitsWithinJointEnvelope(
+        actuator: ActuatorDefinition,
+        attachment: ActuatorAttachment,
+        joint: JointDefinition
+    ) throws {
+        guard joint.kind != .continuous,
+              let lowerLimit = joint.lowerLimit,
+              let upperLimit = joint.upperLimit else {
+            return
+        }
+        let jointRange = ArticulatedActuatorMapping.jointRange(
+            actuatorLimits: actuator.limits,
+            attachment: attachment
+        )
+        guard jointRange.lowerBound.isFinite, jointRange.upperBound.isFinite else {
+            throw KuyuModelValidationError.nonFinite("readiness.dynamic.actuators.\(actuator.id).limits")
+        }
+        let tolerance = 1e-9
+        if jointRange.lowerBound < lowerLimit - tolerance || jointRange.upperBound > upperLimit + tolerance {
+            throw KuyuModelValidationError.invalidRange("readiness.dynamic.actuators.\(actuator.id).limits")
         }
     }
 
@@ -380,11 +454,26 @@ public struct ReadinessGate: Sendable {
         if world.materials.isEmpty {
             throw KuyuModelValidationError.empty("contactTraining.world.materials")
         }
+        let bodyMaterialsByID = Dictionary(uniqueKeysWithValues: body.materials.map { ($0.id, $0) })
         for link in body.links where link.collisions.isEmpty {
             throw KuyuModelValidationError.empty("contactTraining.links.\(link.id).collisions")
         }
-        if body.links.contains(where: { $0.materialID == nil }) {
-            throw KuyuModelValidationError.empty("contactTraining.links.materialID")
+        for link in body.links {
+            guard let materialID = link.materialID else {
+                throw KuyuModelValidationError.empty("contactTraining.links.\(link.id).materialID")
+            }
+            guard let material = bodyMaterialsByID[materialID] else {
+                throw KuyuModelValidationError.unknownReference("contactTraining.links.\(link.id).materialID")
+            }
+            if material.staticFriction == nil {
+                throw KuyuModelValidationError.empty("contactTraining.body.materials.\(materialID).staticFriction")
+            }
+            if material.dynamicFriction == nil {
+                throw KuyuModelValidationError.empty("contactTraining.body.materials.\(materialID).dynamicFriction")
+            }
+            if material.restitution == nil {
+                throw KuyuModelValidationError.empty("contactTraining.body.materials.\(materialID).restitution")
+            }
         }
     }
 
@@ -409,6 +498,15 @@ public struct ReadinessGate: Sendable {
 }
 
 private func validateGeometry(_ geometry: GeometryInstance, field: String) throws {
+    if geometry.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        throw KuyuModelValidationError.empty("\(field).id")
+    }
+    try validatePose(geometry.pose, field: "\(field).pose")
+    if let scale = geometry.scale {
+        try validatePositive(scale.x, "\(field).scale.x")
+        try validatePositive(scale.y, "\(field).scale.y")
+        try validatePositive(scale.z, "\(field).scale.z")
+    }
     switch geometry.kind {
     case .box:
         guard let size = geometry.size else {
@@ -435,6 +533,101 @@ private func validateGeometry(_ geometry: GeometryInstance, field: String) throw
         if geometry.meshPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
             throw KuyuModelValidationError.empty("\(field).meshPath")
         }
+    }
+}
+
+private func validateJointTopology(joints: [JointDefinition]) throws {
+    let parentByChild = Dictionary(uniqueKeysWithValues: joints.map { ($0.childLinkID, $0.parentLinkID) })
+    for joint in joints {
+        var visited: Set<String> = []
+        var current = joint.childLinkID
+        while let parent = parentByChild[current] {
+            if !visited.insert(current).inserted {
+                throw KuyuModelValidationError.invalidRange("body.joints.topology.cycle.\(joint.id)")
+            }
+            current = parent
+        }
+    }
+}
+
+private func validateCompliance(_ compliance: ComplianceModel, field: String) throws {
+    try validatePositive(compliance.stiffness, "\(field).stiffness")
+    try validateNonNegative(compliance.damping, "\(field).damping")
+}
+
+private func validateAtmosphere(_ atmosphere: AtmosphereModel) throws {
+    try validateOptionalPositive(atmosphere.airDensity, "world.atmosphere.airDensity")
+    try validateOptionalPositive(atmosphere.temperatureKelvin, "world.atmosphere.temperatureKelvin")
+}
+
+private func validateWorldMaterials(_ materials: [WorldMaterial]) throws {
+    var materialIDs: Set<String> = []
+    for material in materials {
+        if material.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw KuyuModelValidationError.empty("world.materials.id")
+        }
+        if !materialIDs.insert(material.id).inserted {
+            throw KuyuModelValidationError.duplicate("world.materials.\(material.id)")
+        }
+        try validateNonNegative(material.staticFriction, "world.materials.\(material.id).staticFriction")
+        try validateNonNegative(material.dynamicFriction, "world.materials.\(material.id).dynamicFriction")
+        if material.dynamicFriction > material.staticFriction {
+            throw KuyuModelValidationError.invalidRange("world.materials.\(material.id).dynamicFriction")
+        }
+        try validateUnitInterval(material.restitution, "world.materials.\(material.id).restitution")
+    }
+}
+
+private func validateWorldSurfaces(
+    _ surfaces: [WorldSurface],
+    materials: [WorldMaterial]
+) throws {
+    let materialIDs = Set(materials.map(\.id))
+    var surfaceIDs: Set<String> = []
+    for surface in surfaces {
+        if surface.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw KuyuModelValidationError.empty("world.surfaces.id")
+        }
+        if !surfaceIDs.insert(surface.id).inserted {
+            throw KuyuModelValidationError.duplicate("world.surfaces.\(surface.id)")
+        }
+        if surface.frameID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw KuyuModelValidationError.empty("world.surfaces.\(surface.id).frameID")
+        }
+        if !materialIDs.contains(surface.materialID) {
+            throw KuyuModelValidationError.unknownReference("world.surfaces.\(surface.id).materialID")
+        }
+        try validatePose(surface.pose, field: "world.surfaces.\(surface.id).pose")
+        try validateGeometry(surface.geometry, field: "world.surfaces.\(surface.id).geometry")
+    }
+}
+
+private func validateContact(_ contact: ContactModel, solver: SolverModel) throws {
+    switch contact.mode {
+    case .disabled:
+        if solver.kind != .disabledContact {
+            throw KuyuModelValidationError.invalidRange("world.solver.kind")
+        }
+        try validateOptionalPositive(contact.stiffness, "world.contact.stiffness")
+        try validateOptionalNonNegative(contact.damping, "world.contact.damping")
+    case .penalty:
+        guard solver.kind == .deterministicConstraint else {
+            throw KuyuModelValidationError.invalidRange("world.solver.kind")
+        }
+        guard let stiffness = contact.stiffness else {
+            throw KuyuModelValidationError.empty("world.contact.stiffness")
+        }
+        guard let damping = contact.damping else {
+            throw KuyuModelValidationError.empty("world.contact.damping")
+        }
+        try validatePositive(stiffness, "world.contact.stiffness")
+        try validateNonNegative(damping, "world.contact.damping")
+    case .constraint:
+        guard solver.kind == .deterministicConstraint else {
+            throw KuyuModelValidationError.invalidRange("world.solver.kind")
+        }
+        try validateOptionalPositive(contact.stiffness, "world.contact.stiffness")
+        try validateOptionalNonNegative(contact.damping, "world.contact.damping")
     }
 }
 
@@ -472,6 +665,11 @@ private func validateOptionalPositive(_ value: Double?, _ field: String) throws 
     try validatePositive(value, field)
 }
 
+private func validateOptionalFinite(_ value: Double?, _ field: String) throws {
+    guard let value else { return }
+    try validateFinite(value, field)
+}
+
 private func validateNonNegative(_ value: Double, _ field: String) throws {
     try validateFinite(value, field)
     if value < 0 {
@@ -482,6 +680,18 @@ private func validateNonNegative(_ value: Double, _ field: String) throws {
 private func validateOptionalNonNegative(_ value: Double?, _ field: String) throws {
     guard let value else { return }
     try validateNonNegative(value, field)
+}
+
+private func validateUnitInterval(_ value: Double, _ field: String) throws {
+    try validateFinite(value, field)
+    if value < 0 || value > 1 {
+        throw KuyuModelValidationError.invalidRange(field)
+    }
+}
+
+private func validateOptionalUnitInterval(_ value: Double?, _ field: String) throws {
+    guard let value else { return }
+    try validateUnitInterval(value, field)
 }
 
 private func validateFinite(_ value: Double, _ field: String) throws {

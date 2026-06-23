@@ -40,11 +40,16 @@ public struct ArticulatedRigidBodySimulationRequest: Sendable, Equatable {
 public struct ArticulatedRigidBodySimulator: Sendable {
     public enum SimulationError: Error, Equatable {
         case invalidDuration(Double)
+        case durationStepMismatch(duration: Double, timeStep: Double)
+        case timeStepMismatch(request: Double, world: Double)
         case invalidBody(String)
         case invalidDriveProviderOutput(String)
         case missingJointRange(String)
         case nonFiniteState(String)
         case readinessFailed(String)
+        case unstableTimeStep(substep: Double, timeConstant: Double, actuator: String)
+        case unresolvedContact(maxPenetration: Double, tolerance: Double)
+        case unsupportedWorld(String)
     }
 
     public init() {}
@@ -71,6 +76,14 @@ public struct ArticulatedRigidBodySimulator: Sendable {
         guard request.duration.isFinite, request.duration > 0 else {
             throw SimulationError.invalidDuration(request.duration)
         }
+        let stepCount = try exactStepCount(duration: request.duration, timeStep: request.timeStep.delta)
+        guard abs(request.timeStep.delta - request.world.time.fixedStepSeconds) <= 1e-12 else {
+            throw SimulationError.timeStepMismatch(
+                request: request.timeStep.delta,
+                world: request.world.time.fixedStepSeconds
+            )
+        }
+        try validateSupportedWorld(request.world)
         do {
             _ = try ReadinessGate().validate(
                 body: request.body,
@@ -90,23 +103,28 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             throw SimulationError.invalidBody("movable-joints")
         }
         let driveSignals = try orderedDriveSignals(from: request.embodiment)
+        let actuatorSignals = request.embodiment.signals.actuator.sorted { $0.index < $1.index }
         guard driveSignals.count == movableJoints.count else {
             throw SimulationError.invalidBody("drive-joint-count")
         }
 
         var motorNerve = try MotorNerveChain(contract: request.embodiment)
-        let actuatorSignals = request.embodiment.signals.actuator.sorted { $0.index < $1.index }
         let jointBindings = try bindings(
             joints: movableJoints,
             body: request.body,
             embodiment: request.embodiment,
             actuatorSignals: actuatorSignals
         )
-        let jointRanges = try ranges(from: driveSignals, bindings: jointBindings)
+        let jointRanges = try ranges(bindings: jointBindings)
+        try validateNumericalStability(
+            bindings: jointBindings,
+            substepDelta: request.timeStep.delta / Double(max(request.world.time.substeps, 1))
+        )
         let jointIDs = jointBindings.map(\.joint.id)
         let driveSignalIDs = driveSignals.map(\.id)
         let actuatorSignalIDs = actuatorSignals.map(\.id)
         var provider = driveProvider
+        let initialPositions = try initialPositions(bindings: jointBindings, ranges: jointRanges)
         try provider.reset(context: ArticulatedRigidBodyDriveProviderResetContext(
             seed: request.seed,
             jointIDs: jointIDs,
@@ -114,18 +132,32 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             jointRanges: jointRanges
         ))
         let stateModel = ArticulatedStateModel(body: request.body, world: request.world)
+        let jointDynamics = try stateModel.dynamics(for: jointBindings)
+        let snapshotTopology = try snapshotTopology(body: request.body)
+        let contactSolver = try makeContactSolver(
+            body: request.body,
+            world: request.world,
+            bindings: jointBindings,
+            dynamics: jointDynamics,
+            topology: snapshotTopology
+        )
+        try validateContactNumericalStability(
+            world: request.world,
+            dynamics: jointDynamics,
+            substepDelta: request.timeStep.delta / Double(max(request.world.time.substeps, 1))
+        )
         var state = ArticulatedState(
-            position: Array(repeating: 0, count: jointBindings.count),
+            position: initialPositions,
             velocity: Array(repeating: 0, count: jointBindings.count),
             torque: Array(repeating: 0, count: jointBindings.count)
         )
-        var targets = state.position
-        let stepCount = Int((request.duration / request.timeStep.delta).rounded(.down))
+        var contactMetrics = ArticulatedContactMetrics.disabled
+        var targets = initialPositions
         var logs: [WorldStepLog] = []
         logs.reserveCapacity(stepCount)
 
         for step in 0..<stepCount {
-            if let control {
+            if let control = control {
                 try await control.checkpoint()
             }
 
@@ -146,7 +178,7 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             let actuatorValues = try motorNerve.update(
                 input: drives,
                 corrections: [],
-                telemetry: MotorNerveTelemetry(actuatorTelemetry: actuatorTelemetry(
+                telemetry: MotorNerveTelemetry(actuatorTelemetry: try actuatorTelemetry(
                     state: state,
                     bindings: jointBindings,
                     actuatorSignals: actuatorSignals
@@ -154,21 +186,26 @@ public struct ArticulatedRigidBodySimulator: Sendable {
                 time: time
             )
             targets = try jointTargets(values: actuatorValues, bindings: jointBindings, actuatorSignals: actuatorSignals)
-            state = try stateModel.step(
+            let stepResult = try stateModel.step(
                 state: state,
                 targets: targets,
-                bindings: jointBindings,
-                deltaTime: request.timeStep.delta
+                dynamics: jointDynamics,
+                deltaTime: request.timeStep.delta,
+                contactSolver: contactSolver
             )
+            state = stepResult.state
+            contactMetrics = stepResult.contactMetrics
 
             let log = try makeStepLog(
                 body: request.body,
                 world: request.world,
                 embodiment: request.embodiment,
                 time: time,
+                snapshotTopology: snapshotTopology,
                 bindings: jointBindings,
                 state: state,
                 targets: targets,
+                contactMetrics: contactMetrics,
                 drives: drives,
                 actuatorValues: actuatorValues,
                 actuatorSignals: actuatorSignals,
@@ -187,9 +224,29 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             seed: request.seed,
             timeStep: request.timeStep,
             determinism: request.determinism,
-            configHash: "articulated-dynamic-v2-\(request.body.bodyID)-duration-\(request.duration)-dt-\(request.timeStep.delta)-drive-\(provider.providerID)",
+            configHash: try configHash(request: request, providerID: provider.providerID),
             events: logs
         )
+    }
+
+    private func configHash(
+        request: ArticulatedRigidBodySimulationRequest,
+        providerID: String
+    ) throws -> String {
+        try ConfigHash.hash(ArticulatedSimulationConfigEnvelope(
+            schemaVersion: "kuyu.articulated.simulation-config.v1",
+            simulatorVersion: "articulated-dynamic-v3",
+            body: request.body,
+            world: request.world,
+            embodiment: request.embodiment,
+            compatibilityReport: request.compatibilityReport,
+            determinism: request.determinism,
+            readinessLevel: request.readinessLevel,
+            duration: request.duration,
+            timeStep: request.timeStep,
+            seed: request.seed,
+            driveProviderID: providerID
+        ))
     }
 
     private func orderedDriveSignals(from contract: EmbodimentContract) throws -> [SignalDefinition] {
@@ -202,28 +259,100 @@ public struct ArticulatedRigidBodySimulator: Sendable {
         }
     }
 
+    private func exactStepCount(duration: Double, timeStep: Double) throws -> Int {
+        let rawStepCount = duration / timeStep
+        let roundedStepCount = rawStepCount.rounded()
+        guard abs(rawStepCount - roundedStepCount) <= 1e-9 else {
+            throw SimulationError.durationStepMismatch(duration: duration, timeStep: timeStep)
+        }
+        let stepCount = Int(roundedStepCount)
+        guard stepCount > 0 else {
+            throw SimulationError.invalidDuration(duration)
+        }
+        return stepCount
+    }
+
+    private func validateSupportedWorld(_ world: KuyuWorldModel) throws {
+        guard world.integrator.kind == .semiImplicitEuler else {
+            throw SimulationError.unsupportedWorld("integrator.\(world.integrator.kind.rawValue)")
+        }
+        switch world.contact.mode {
+        case .disabled:
+            guard world.solver.kind == .disabledContact else {
+                throw SimulationError.unsupportedWorld(
+                    "contact.disabled.solver.\(world.solver.kind.rawValue)"
+                )
+            }
+        case .penalty, .constraint:
+            guard world.solver.kind == .deterministicConstraint else {
+                throw SimulationError.unsupportedWorld(
+                    "contact.\(world.contact.mode.rawValue).solver.\(world.solver.kind.rawValue)"
+                )
+            }
+        }
+    }
+
+    private func makeContactSolver(
+        body: KuyuBodyModel,
+        world: KuyuWorldModel,
+        bindings: [ArticulatedJointBinding],
+        dynamics: [ArticulatedJointDynamics],
+        topology: ArticulatedSnapshotTopology
+    ) throws -> ArticulatedContactSolver? {
+        guard world.contact.mode != .disabled else { return nil }
+        return try ArticulatedContactSolver(
+            body: body,
+            world: world,
+            bindings: bindings,
+            dynamics: dynamics,
+            topology: topology
+        )
+    }
+
+    private func validateContactNumericalStability(
+        world: KuyuWorldModel,
+        dynamics: [ArticulatedJointDynamics],
+        substepDelta: Double
+    ) throws {
+        guard world.contact.mode == .penalty else { return }
+        guard let stiffness = world.contact.stiffness else {
+            throw SimulationError.unsupportedWorld("contact.penalty.stiffness")
+        }
+        let minimumInertia = dynamics.map(\.effectiveInertia).min() ?? 1e-6
+        let contactTimeConstant = sqrt(max(minimumInertia, 1e-9) / stiffness)
+        guard substepDelta <= contactTimeConstant * 0.25 + 1e-12 else {
+            throw SimulationError.unstableTimeStep(
+                substep: substepDelta,
+                timeConstant: contactTimeConstant * 0.25,
+                actuator: "contact.penalty"
+            )
+        }
+    }
+
     private func bindings(
         joints: [JointDefinition],
         body: KuyuBodyModel,
         embodiment: EmbodimentContract,
         actuatorSignals: [SignalDefinition]
     ) throws -> [ArticulatedJointBinding] {
-        let attachmentsByJoint = Dictionary(uniqueKeysWithValues: body.actuatorAttachments.map { ($0.jointID, $0) })
+        let jointsByID = Dictionary(uniqueKeysWithValues: joints.map { ($0.id, $0) })
+        let attachmentsByActuator = Dictionary(uniqueKeysWithValues: body.actuatorAttachments.map { ($0.actuatorID, $0) })
         let actuatorsByID = Dictionary(uniqueKeysWithValues: embodiment.actuators.map { ($0.id, $0) })
-        let actuatorSignalsByID = Dictionary(uniqueKeysWithValues: actuatorSignals.map { ($0.id, $0) })
+        let actuatorsBySignalID = try actuatorMapBySignalID(embodiment.actuators)
 
-        return try joints.map { joint in
-            guard let attachment = attachmentsByJoint[joint.id] else {
-                throw SimulationError.invalidBody("attachment.\(joint.id)")
+        let bindings = try actuatorSignals.map { signal in
+            guard let actuatorID = actuatorsBySignalID[signal.id],
+                  let actuator = actuatorsByID[actuatorID] else {
+                throw SimulationError.invalidBody("actuator.signal.\(signal.id)")
             }
-            guard let actuator = actuatorsByID[attachment.actuatorID] else {
-                throw SimulationError.invalidBody("actuator.\(attachment.actuatorID)")
-            }
-            guard actuator.channels.count == 1, let channelID = actuator.channels.first else {
+            guard actuator.channels.count == 1 else {
                 throw SimulationError.invalidBody("actuator.channels.\(actuator.id)")
             }
-            guard let signal = actuatorSignalsByID[channelID] else {
-                throw SimulationError.invalidBody("actuator.signal.\(channelID)")
+            guard let attachment = attachmentsByActuator[actuator.id] else {
+                throw SimulationError.invalidBody("attachment.\(actuator.id)")
+            }
+            guard let joint = jointsByID[attachment.jointID] else {
+                throw SimulationError.invalidBody("attachment.joint.\(attachment.jointID)")
             }
             return ArticulatedJointBinding(
                 joint: joint,
@@ -232,6 +361,25 @@ public struct ArticulatedRigidBodySimulator: Sendable {
                 actuatorSignal: signal
             )
         }
+        let boundJointIDs = Set(bindings.map(\.joint.id))
+        let movableJointIDs = Set(joints.map(\.id))
+        guard boundJointIDs == movableJointIDs else {
+            throw SimulationError.invalidBody("attachment.coverage")
+        }
+        return bindings
+    }
+
+    private func actuatorMapBySignalID(_ actuators: [ActuatorDefinition]) throws -> [String: String] {
+        var actuatorBySignalID: [String: String] = [:]
+        for actuator in actuators {
+            for channelID in actuator.channels {
+                if actuatorBySignalID[channelID] != nil {
+                    throw SimulationError.invalidBody("actuator.signal.duplicate.\(channelID)")
+                }
+                actuatorBySignalID[channelID] = actuator.id
+            }
+        }
+        return actuatorBySignalID
     }
 
     private func jointTargets(
@@ -239,41 +387,102 @@ public struct ArticulatedRigidBodySimulator: Sendable {
         bindings: [ArticulatedJointBinding],
         actuatorSignals: [SignalDefinition]
     ) throws -> [Double] {
-        let signalsByIndex = Dictionary(uniqueKeysWithValues: actuatorSignals.map { (UInt32($0.index), $0.id) })
-        var valuesBySignalID: [String: Double] = [:]
+        guard values.count == bindings.count, actuatorSignals.count == bindings.count else {
+            throw SimulationError.invalidBody("actuator.value.count")
+        }
+        var targets = Array(repeating: 0.0, count: bindings.count)
+        var seen = Array(repeating: false, count: bindings.count)
         for value in values {
-            guard let signalID = signalsByIndex[value.index.rawValue] else {
+            let index = Int(value.index.rawValue)
+            guard index >= 0, index < bindings.count else {
                 throw SimulationError.invalidBody("actuator.index.\(value.index.rawValue)")
             }
-            valuesBySignalID[signalID] = value.value
-        }
-        return try bindings.map { binding in
-            guard let value = valuesBySignalID[binding.actuatorSignal.id] else {
-                throw SimulationError.invalidBody("actuator.value.\(binding.actuatorSignal.id)")
+            guard !seen[index] else {
+                throw SimulationError.invalidBody("actuator.index.duplicate.\(value.index.rawValue)")
             }
-            return ((value - binding.attachment.actuatorZeroOffset) / binding.attachment.transmissionRatio)
-                + binding.attachment.jointZeroOffset
+            guard bindings[index].actuatorSignal.id == actuatorSignals[index].id else {
+                throw SimulationError.invalidBody("actuator.binding.order.\(value.index.rawValue)")
+            }
+            guard value.value.isFinite else {
+                throw SimulationError.nonFiniteState("actuator.value[\(index)]")
+            }
+            let target = ArticulatedActuatorMapping.jointPosition(
+                actuatorPosition: value.value,
+                attachment: bindings[index].attachment
+            )
+            guard target.isFinite else {
+                throw SimulationError.nonFiniteState("joint.target[\(index)]")
+            }
+            targets[index] = target
+            seen[index] = true
+        }
+        guard seen.allSatisfy({ $0 }) else {
+            throw SimulationError.invalidBody("actuator.value.coverage")
+        }
+        return targets
+    }
+
+    private func ranges(bindings: [ArticulatedJointBinding]) throws -> [ClosedRange<Double>] {
+        try bindings.map { binding in
+            let actuatorRange = ArticulatedActuatorMapping.jointRange(
+                actuatorLimits: binding.actuator.limits,
+                attachment: binding.attachment
+            )
+            let lower = max(
+                actuatorRange.lowerBound,
+                binding.joint.softLowerLimit ?? binding.joint.lowerLimit ?? actuatorRange.lowerBound
+            )
+            let upper = min(
+                actuatorRange.upperBound,
+                binding.joint.softUpperLimit ?? binding.joint.upperLimit ?? actuatorRange.upperBound
+            )
+            if lower > upper {
+                guard lower - upper <= 1e-9 else {
+                    throw SimulationError.missingJointRange(binding.actuatorSignal.id)
+                }
+                let collapsed = (lower + upper) * 0.5
+                return collapsed...collapsed
+            }
+            guard lower.isFinite, upper.isFinite else {
+                throw SimulationError.missingJointRange(binding.actuatorSignal.id)
+            }
+            return lower...upper
         }
     }
 
-    private func ranges(
-        from signals: [SignalDefinition],
-        bindings: [ArticulatedJointBinding]
-    ) throws -> [ClosedRange<Double>] {
-        try signals.enumerated().map { index, signal in
-            guard let range = signal.range else {
-                throw SimulationError.missingJointRange(signal.id)
+    private func validateNumericalStability(
+        bindings: [ArticulatedJointBinding],
+        substepDelta: Double
+    ) throws {
+        guard substepDelta.isFinite, substepDelta > 0 else {
+            throw SimulationError.nonFiniteState("substepDelta")
+        }
+        for binding in bindings {
+            let timeConstant = binding.actuator.dynamics?.timeConstantSeconds ?? 0.001
+            guard substepDelta <= timeConstant + 1e-12 else {
+                throw SimulationError.unstableTimeStep(
+                    substep: substepDelta,
+                    timeConstant: timeConstant,
+                    actuator: binding.actuator.id
+                )
             }
-            guard bindings.indices.contains(index) else {
-                return range.min...range.max
+        }
+    }
+
+    private func initialPositions(
+        bindings: [ArticulatedJointBinding],
+        ranges: [ClosedRange<Double>]
+    ) throws -> [Double] {
+        guard bindings.count == ranges.count else {
+            throw SimulationError.invalidBody("joint-range-count")
+        }
+        return try bindings.enumerated().map { index, binding in
+            let range = ranges[index]
+            let candidate = binding.joint.homePosition ?? 0.0
+            guard candidate.isFinite else {
+                throw SimulationError.nonFiniteState("homePosition.\(binding.joint.id)")
             }
-            let joint = bindings[index].joint
-            let lower = max(range.min, joint.softLowerLimit ?? joint.lowerLimit ?? range.min)
-            let upper = min(range.max, joint.softUpperLimit ?? joint.upperLimit ?? range.max)
-            guard lower <= upper else {
-                throw SimulationError.missingJointRange(signal.id)
-            }
-            return lower...upper
+            return min(max(candidate, range.lowerBound), range.upperBound)
         }
     }
 
@@ -300,9 +509,11 @@ public struct ArticulatedRigidBodySimulator: Sendable {
         world: KuyuWorldModel,
         embodiment: EmbodimentContract,
         time: WorldTime,
+        snapshotTopology: ArticulatedSnapshotTopology,
         bindings: [ArticulatedJointBinding],
         state: ArticulatedState,
         targets: [Double],
+        contactMetrics: ArticulatedContactMetrics,
         drives: [DriveIntent],
         actuatorValues: [ActuatorValue],
         actuatorSignals: [SignalDefinition],
@@ -319,7 +530,8 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             body: body,
             bindings: bindings,
             state: state,
-            targets: targets
+            targets: targets,
+            contactMetrics: contactMetrics
         )
         return WorldStepLog(
             time: time,
@@ -338,10 +550,14 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             driveIntents: drives,
             reflexCorrections: [],
             actuatorValues: actuatorValues,
-            actuatorTelemetry: actuatorTelemetry(state: state, bindings: bindings, actuatorSignals: actuatorSignals),
+            actuatorTelemetry: try actuatorTelemetry(state: state, bindings: bindings, actuatorSignals: actuatorSignals),
             motorNerveTrace: motorNerveTrace,
             safetyTrace: try SafetyTrace(omegaMagnitude: state.velocity.map(abs).max() ?? 0.0, tiltRadians: 0.0),
-            plantState: PlantStateSnapshot(root: root, bodies: try linkSnapshots(body: body, scalars: scalars), scalars: scalars),
+            plantState: PlantStateSnapshot(
+                root: root,
+                bodies: try linkSnapshots(topology: snapshotTopology, scalars: scalars),
+                scalars: scalars
+            ),
             disturbances: DisturbanceSnapshot(
                 forceWorld: Axis3(x: 0.0, y: 0.0, z: 0.0),
                 torqueBody: Axis3(
@@ -363,24 +579,32 @@ public struct ArticulatedRigidBodySimulator: Sendable {
         state: ArticulatedState,
         bindings: [ArticulatedJointBinding],
         actuatorSignals: [SignalDefinition]
-    ) -> ActuatorTelemetrySnapshot {
-        var valuesBySignalID: [String: Double] = [:]
-        for index in bindings.indices {
-            valuesBySignalID[bindings[index].actuatorSignal.id] = state.position[index]
+    ) throws -> ActuatorTelemetrySnapshot {
+        guard actuatorSignals.count == bindings.count, state.position.count == bindings.count else {
+            throw SimulationError.invalidBody("actuator.telemetry.count")
         }
-        return ActuatorTelemetrySnapshot(
-            channels: actuatorSignals.map { signal in
-                let value = valuesBySignalID[signal.id] ?? 0.0
-                return ActuatorChannelSnapshot(id: signal.id, value: value, units: signal.units)
+        let channels = try actuatorSignals.enumerated().map { index, signal in
+            guard bindings[index].actuatorSignal.id == signal.id else {
+                throw SimulationError.invalidBody("actuator.telemetry.order.\(signal.id)")
             }
-        )
+            let actuatorPosition = ArticulatedActuatorMapping.actuatorPosition(
+                jointPosition: state.position[index],
+                attachment: bindings[index].attachment
+            )
+            guard actuatorPosition.isFinite else {
+                throw SimulationError.nonFiniteState("actuator.telemetry[\(index)]")
+            }
+            return ActuatorChannelSnapshot(id: signal.id, value: actuatorPosition, units: signal.units)
+        }
+        return ActuatorTelemetrySnapshot(channels: channels)
     }
 
     private func scalarState(
         body: KuyuBodyModel,
         bindings: [ArticulatedJointBinding],
         state: ArticulatedState,
-        targets: [Double]
+        targets: [Double],
+        contactMetrics: ArticulatedContactMetrics
     ) throws -> [String: Double] {
         var scalars: [String: Double] = [:]
         var positionsByJointID: [String: Double] = [:]
@@ -391,17 +615,39 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             let binding = bindings[index]
             let signalID = binding.actuatorSignal.id
             let target = targets.indices.contains(index) ? targets[index] : 0
+            let actuatorPosition = ArticulatedActuatorMapping.actuatorPosition(
+                jointPosition: state.position[index],
+                attachment: binding.attachment
+            )
+            let actuatorTarget = ArticulatedActuatorMapping.actuatorPosition(
+                jointPosition: target,
+                attachment: binding.attachment
+            )
+            let actuatorVelocity = ArticulatedActuatorMapping.actuatorVelocity(
+                jointVelocity: state.velocity[index],
+                attachment: binding.attachment
+            )
+            let actuatorTorque = ArticulatedActuatorMapping.actuatorTorque(
+                jointTorque: state.torque[index],
+                attachment: binding.attachment
+            )
+            guard actuatorPosition.isFinite,
+                  actuatorTarget.isFinite,
+                  actuatorVelocity.isFinite,
+                  actuatorTorque.isFinite else {
+                throw SimulationError.nonFiniteState("actuator.scalar[\(index)]")
+            }
             positionsByJointID[binding.joint.id] = state.position[index]
             velocitiesByJointID[binding.joint.id] = state.velocity[index]
             targetsByJointID[binding.joint.id] = target
             torquesByJointID[binding.joint.id] = state.torque[index]
-            scalars[signalID] = state.position[index]
+            scalars[signalID] = actuatorPosition
             scalars[binding.joint.id] = state.position[index]
-            scalars["target_\(signalID)"] = target
+            scalars["target_\(signalID)"] = actuatorTarget
             scalars["target_\(binding.joint.id)"] = target
-            scalars["velocity_\(signalID)"] = state.velocity[index]
+            scalars["velocity_\(signalID)"] = actuatorVelocity
             scalars["velocity_\(binding.joint.id)"] = state.velocity[index]
-            scalars["torque_\(signalID)"] = state.torque[index]
+            scalars["torque_\(signalID)"] = actuatorTorque
             scalars["torque_\(binding.joint.id)"] = state.torque[index]
         }
 
@@ -442,338 +688,70 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             }
             unresolvedMimics = remaining
         }
+        scalars["contact.active.count"] = Double(contactMetrics.activeContacts)
+        scalars["contact.penetration.max"] = contactMetrics.maxPenetration
+        scalars["contact.normalImpulse.max"] = contactMetrics.maxNormalImpulse
+        scalars["contact.normalForce.max"] = contactMetrics.maxNormalForce
+        scalars["contact.solver.iterations"] = Double(contactMetrics.solverIterations)
         return scalars
     }
 
-    private func linkSnapshots(
-        body: KuyuBodyModel,
-        scalars: [String: Double]
-    ) throws -> [RigidBodySnapshot] {
+    private func snapshotTopology(body: KuyuBodyModel) throws -> ArticulatedSnapshotTopology {
         let childLinkIDs = Set(body.joints.map(\.childLinkID))
         let rootLinks = body.links.filter { !childLinkIDs.contains($0.id) }
         guard !rootLinks.isEmpty else {
             throw SimulationError.invalidBody("root-link")
         }
-        var statesByLinkID = Dictionary(
-            uniqueKeysWithValues: rootLinks.map { ($0.id, LinkKinematicState.identity) }
-        )
-        var snapshotsByChildLinkID: [String: RigidBodySnapshot] = [:]
-        snapshotsByChildLinkID.reserveCapacity(body.joints.count)
-        var unresolved = body.joints
-
-        while !unresolved.isEmpty {
-            var remaining: [JointDefinition] = []
-            var resolvedCount = 0
-
-            for joint in unresolved {
-                guard let parentState = statesByLinkID[joint.parentLinkID] else {
-                    remaining.append(joint)
-                    continue
-                }
-                let scalar = scalars[joint.id] ?? joint.homePosition ?? 0
-                let velocity = scalars["velocity_\(joint.id)"] ?? 0
-                let childState = try childLinkState(
-                    parent: parentState,
-                    joint: joint,
-                    scalar: scalar,
-                    velocity: velocity
-                )
-                statesByLinkID[joint.childLinkID] = childState
-                snapshotsByChildLinkID[joint.childLinkID] = RigidBodySnapshot(
-                    id: joint.childLinkID,
-                    position: axis3(childState.position),
-                    velocity: axis3(childState.velocity),
-                    orientation: QuaternionSnapshot(orientation: childState.orientation),
-                    angularVelocity: axis3(childState.angularVelocity)
-                )
-                resolvedCount += 1
-            }
-
-            if resolvedCount == 0 {
-                let ids = remaining.map(\.id).joined(separator: ",")
-                throw SimulationError.invalidBody("joint-topology.\(ids)")
-            }
-            unresolved = remaining
-        }
-
-        return body.joints.compactMap { snapshotsByChildLinkID[$0.childLinkID] }
-    }
-
-    private func childLinkState(
-        parent: LinkKinematicState,
-        joint: JointDefinition,
-        scalar: Double,
-        velocity: Double
-    ) throws -> LinkKinematicState {
-        let originTranslation = simdVector(joint.origin.xyz)
-        let originWorldOffset = parent.orientation.act(originTranslation)
-        let originPosition = parent.position + originWorldOffset
-        let originVelocity = parent.velocity + simd_cross(parent.angularVelocity, originWorldOffset)
-        let originOrientation = (parent.orientation * orientation(fromRPY: joint.origin.rpy)).normalizedQuat
-
-        switch joint.kind {
-        case .fixed:
-            return LinkKinematicState(
-                position: originPosition,
-                velocity: originVelocity,
-                orientation: originOrientation,
-                angularVelocity: parent.angularVelocity
-            )
-        case .revolute, .continuous:
-            let axis = try normalizedAxis(joint)
-            let worldAxis = originOrientation.act(axis)
-            return LinkKinematicState(
-                position: originPosition,
-                velocity: originVelocity,
-                orientation: (originOrientation * simd_quatd(angle: scalar, axis: axis)).normalizedQuat,
-                angularVelocity: parent.angularVelocity + worldAxis * velocity
-            )
-        case .prismatic:
-            let axis = try normalizedAxis(joint)
-            let worldAxis = originOrientation.act(axis)
-            let displacement = worldAxis * scalar
-            return LinkKinematicState(
-                position: originPosition + displacement,
-                velocity: originVelocity + simd_cross(parent.angularVelocity, displacement) + worldAxis * velocity,
-                orientation: originOrientation,
-                angularVelocity: parent.angularVelocity
-            )
-        }
-    }
-
-    private func normalizedAxis(_ joint: JointDefinition) throws -> SIMD3<Double> {
-        let axis = simdVector(joint.axis)
-        let length = simd_length(axis)
-        guard length > 0 else {
-            throw SimulationError.invalidBody("joint-axis.\(joint.id)")
-        }
-        return axis / length
-    }
-
-    private func orientation(fromRPY rpy: KuyuVector3) -> simd_quatd {
-        let roll = simd_quatd(angle: rpy.x, axis: SIMD3<Double>(1, 0, 0))
-        let pitch = simd_quatd(angle: rpy.y, axis: SIMD3<Double>(0, 1, 0))
-        let yaw = simd_quatd(angle: rpy.z, axis: SIMD3<Double>(0, 0, 1))
-        return (yaw * pitch * roll).normalizedQuat
-    }
-
-    private func simdVector(_ vector: KuyuVector3) -> SIMD3<Double> {
-        SIMD3<Double>(vector.x, vector.y, vector.z)
-    }
-
-    private func axis3(_ vector: SIMD3<Double>) -> Axis3 {
-        Axis3(x: vector.x, y: vector.y, z: vector.z)
-    }
-
-}
-
-private struct LinkKinematicState: Sendable, Equatable {
-    var position: SIMD3<Double>
-    var velocity: SIMD3<Double>
-    var orientation: simd_quatd
-    var angularVelocity: SIMD3<Double>
-
-    static let identity = LinkKinematicState(
-        position: SIMD3<Double>(repeating: 0),
-        velocity: SIMD3<Double>(repeating: 0),
-        orientation: simd_quatd(angle: 0, axis: SIMD3<Double>(0, 0, 1)),
-        angularVelocity: SIMD3<Double>(repeating: 0)
-    )
-}
-
-private struct ArticulatedState: Sendable, Equatable {
-    var position: [Double]
-    var velocity: [Double]
-    var torque: [Double]
-}
-
-private struct ArticulatedJointBinding: Sendable, Equatable {
-    let joint: JointDefinition
-    let attachment: ActuatorAttachment
-    let actuator: ActuatorDefinition
-    let actuatorSignal: SignalDefinition
-}
-
-private struct ArticulatedStateModel: Sendable {
-    private let world: KuyuWorldModel
-    private let linkByID: [String: LinkDefinition]
-    private let childLinksByParent: [String: [String]]
-
-    init(body: KuyuBodyModel, world: KuyuWorldModel) {
-        self.world = world
-        self.linkByID = Dictionary(uniqueKeysWithValues: body.links.map { ($0.id, $0) })
-        var children: [String: [String]] = [:]
+        var jointsByParentLinkID: [String: [JointDefinition]] = [:]
         for joint in body.joints {
-            children[joint.parentLinkID, default: []].append(joint.childLinkID)
+            jointsByParentLinkID[joint.parentLinkID, default: []].append(joint)
         }
-        self.childLinksByParent = children
-    }
+        var orderedJoints: [JointDefinition] = []
+        orderedJoints.reserveCapacity(body.joints.count)
+        var visitedJointIDs: Set<String> = []
+        var linkStack = rootLinks.map(\.id)
 
-    func step(
-        state: ArticulatedState,
-        targets: [Double],
-        bindings: [ArticulatedJointBinding],
-        deltaTime: Double
-    ) throws -> ArticulatedState {
-        var next = state
-        try ensureFinite(deltaTime, "deltaTime")
-        guard deltaTime > 0 else {
-            throw ArticulatedRigidBodySimulator.SimulationError.nonFiniteState("deltaTime")
-        }
-        let substeps = max(world.time.substeps, 1)
-        let substepDelta = deltaTime / Double(substeps)
-        for _ in 0..<substeps {
-            next = try integrateSubstep(
-                state: next,
-                targets: targets,
-                bindings: bindings,
-                deltaTime: substepDelta
-            )
-        }
-        return next
-    }
-
-    private func integrateSubstep(
-        state: ArticulatedState,
-        targets: [Double],
-        bindings: [ArticulatedJointBinding],
-        deltaTime: Double
-    ) throws -> ArticulatedState {
-        var next = state
-        for index in bindings.indices {
-            let binding = bindings[index]
-            let joint = binding.joint
-            let current = state.position[index]
-            let velocity = state.velocity[index]
-            let target = targets.indices.contains(index) ? targets[index] : current
-            let effectiveInertia = inertia(for: binding)
-            let effortLimit = effortLimit(for: binding)
-            try ensureFinite(current, "position[\(index)]")
-            try ensureFinite(velocity, "velocity[\(index)]")
-            try ensureFinite(target, "target[\(index)]")
-            try ensureFinite(effectiveInertia, "inertia[\(index)]")
-            try ensureFinite(effortLimit, "effortLimit[\(index)]")
-            let dynamics = binding.actuator.dynamics
-            let timeConstant = max(dynamics?.timeConstantSeconds ?? 0.001, 0.001)
-            let stiffness = effectiveInertia / (timeConstant * timeConstant)
-            let servoDamping = 2.0 * sqrt(max(stiffness * effectiveInertia, 0.0))
-            let gravityTorque = gravityTorque(for: joint, position: current)
-            let damping = joint.damping + (dynamics?.damping ?? 0)
-            let friction = (joint.coulombFriction + (dynamics?.coulombFriction ?? 0)) * sign(velocity)
-            let rawTorque = stiffness * (target - current)
-                - servoDamping * velocity
-                - damping * velocity
-                - friction
-                + gravityTorque
-            let torque = clamp(rawTorque, min: -effortLimit, max: effortLimit)
-            let acceleration = torque / effectiveInertia
-            let limitedVelocity = velocityLimit(for: joint, proposed: velocity + acceleration * deltaTime)
-            var proposedPosition = current + limitedVelocity * deltaTime
-            var proposedVelocity = limitedVelocity
-            if let lower = joint.lowerLimit, proposedPosition < lower {
-                proposedPosition = lower
-                proposedVelocity = 0
+        while !linkStack.isEmpty {
+            let parentLinkID = linkStack.removeFirst()
+            for joint in jointsByParentLinkID[parentLinkID] ?? [] {
+                guard visitedJointIDs.insert(joint.id).inserted else {
+                    throw SimulationError.invalidBody("joint-topology.duplicate.\(joint.id)")
+                }
+                orderedJoints.append(joint)
+                linkStack.append(joint.childLinkID)
             }
-            if let upper = joint.upperLimit, proposedPosition > upper {
-                proposedPosition = upper
-                proposedVelocity = 0
-            }
-            try ensureFinite(torque, "torque[\(index)]")
-            try ensureFinite(acceleration, "acceleration[\(index)]")
-            try ensureFinite(proposedPosition, "position.next[\(index)]")
-            try ensureFinite(proposedVelocity, "velocity.next[\(index)]")
-            next.position[index] = proposedPosition
-            next.velocity[index] = proposedVelocity
-            next.torque[index] = torque
         }
-        return next
-    }
-
-    private func inertia(for joint: JointDefinition) -> Double {
-        let axis = joint.axis
-        let descendants = descendantLinks(from: joint.childLinkID)
-        let total = descendants.reduce(0.0) { partial, link in
-            let rotational = abs(axis.x) * link.inertia.ixx
-                + abs(axis.y) * link.inertia.iyy
-                + abs(axis.z) * link.inertia.izz
-            let leverVector = KuyuVector3(
-                x: joint.origin.xyz.x + link.centerOfMass.x,
-                y: joint.origin.xyz.y + link.centerOfMass.y,
-                z: joint.origin.xyz.z + link.centerOfMass.z
-            )
-            let lever = perpendicularLever(axis: axis, vector: leverVector)
-            return partial + rotational + link.mass * lever * lever
+        guard orderedJoints.count == body.joints.count else {
+            let resolvedIDs = Set(orderedJoints.map(\.id))
+            let unresolvedIDs = body.joints
+                .filter { !resolvedIDs.contains($0.id) }
+                .map(\.id)
+                .joined(separator: ",")
+            throw SimulationError.invalidBody("joint-topology.\(unresolvedIDs)")
         }
-        return max(total, 1e-6)
+        return ArticulatedSnapshotTopology(rootLinks: rootLinks, orderedJoints: orderedJoints)
     }
 
-    private func inertia(for binding: ArticulatedJointBinding) -> Double {
-        inertia(for: binding.joint) + (binding.attachment.reflectedInertia ?? 0)
+    private func linkSnapshots(
+        topology: ArticulatedSnapshotTopology,
+        scalars: [String: Double]
+    ) throws -> [RigidBodySnapshot] {
+        try ArticulatedKinematics(topology: topology).snapshots(scalars: scalars)
     }
 
-    private func effortLimit(for binding: ArticulatedJointBinding) -> Double {
-        let joint = binding.joint
-        let jointLimit = joint.effortLimit ?? .greatestFiniteMagnitude
-        let attachmentLimit = binding.attachment.torqueLimit
-        let actuatorLimit = binding.actuator.dynamics?.torqueLimit ?? .greatestFiniteMagnitude
-        let transmissionLimit = actuatorLimit
-            * binding.attachment.mechanicalReductionRatio
-            * (binding.attachment.efficiency ?? 1.0)
-        return max(min(jointLimit, attachmentLimit, transmissionLimit), 1e-6)
-    }
+}
 
-    private func gravityTorque(for joint: JointDefinition, position: Double) -> Double {
-        let g = abs(world.gravity.acceleration.z)
-        let massLever = descendantLinks(from: joint.childLinkID).reduce(0.0) { partial, link in
-            let lever = max(abs(joint.origin.xyz.x + link.centerOfMass.x), 0.01)
-            return partial + link.mass * lever
-        }
-        if abs(joint.axis.y) > 0 || abs(joint.axis.x) > 0 {
-            return -massLever * g * sin(position)
-        }
-        return 0
-    }
-
-    private func descendantLinks(from rootLinkID: String) -> [LinkDefinition] {
-        guard let root = linkByID[rootLinkID] else { return [] }
-        var result = [root]
-        for childID in childLinksByParent[rootLinkID] ?? [] {
-            result.append(contentsOf: descendantLinks(from: childID))
-        }
-        return result
-    }
-
-    private func perpendicularLever(axis: KuyuVector3, vector: KuyuVector3) -> Double {
-        let axisLength = sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z)
-        guard axisLength > 0 else { return 0.01 }
-        let ax = axis.x / axisLength
-        let ay = axis.y / axisLength
-        let az = axis.z / axisLength
-        let dot = vector.x * ax + vector.y * ay + vector.z * az
-        let px = vector.x - dot * ax
-        let py = vector.y - dot * ay
-        let pz = vector.z - dot * az
-        return max(sqrt(px * px + py * py + pz * pz), 0.01)
-    }
-
-    private func velocityLimit(for joint: JointDefinition, proposed: Double) -> Double {
-        guard let limit = joint.velocityLimit else { return proposed }
-        return clamp(proposed, min: -limit, max: limit)
-    }
-
-    private func sign(_ value: Double) -> Double {
-        if value > 0 { return 1 }
-        if value < 0 { return -1 }
-        return 0
-    }
-
-    private func clamp(_ value: Double, min lower: Double, max upper: Double) -> Double {
-        Swift.min(Swift.max(value, lower), upper)
-    }
-
-    private func ensureFinite(_ value: Double, _ field: String) throws {
-        if !value.isFinite {
-            throw ArticulatedRigidBodySimulator.SimulationError.nonFiniteState(field)
-        }
-    }
+private struct ArticulatedSimulationConfigEnvelope: Sendable, Encodable, Equatable {
+    let schemaVersion: String
+    let simulatorVersion: String
+    let body: KuyuBodyModel
+    let world: KuyuWorldModel
+    let embodiment: EmbodimentContract
+    let compatibilityReport: CompatibilityReport?
+    let determinism: DeterminismConfig
+    let readinessLevel: ReadinessLevel
+    let duration: Double
+    let timeStep: TimeStep
+    let seed: ScenarioSeed
+    let driveProviderID: String
 }
