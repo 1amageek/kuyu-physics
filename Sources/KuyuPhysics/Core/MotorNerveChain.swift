@@ -2,7 +2,7 @@ import Foundation
 import EmbodimentContract
 import KuyuCore
 
-public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider {
+public struct MotorNerveChain: MotorNerveEndpoint, MotorNerveTraceProvider, Sendable {
     public enum ChainError: Error, Equatable {
         case driveCountMismatch(expected: Int, actual: Int)
         case missingSignal(String)

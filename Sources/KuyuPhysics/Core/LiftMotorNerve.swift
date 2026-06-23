@@ -1,6 +1,6 @@
 import KuyuCore
 
-public struct LiftMotorNerve: MotorNerveEndpoint {
+public struct LiftMotorNerve: MotorNerveEndpoint, Sendable {
     public let motorMaxThrusts: MotorMaxThrusts
 
     public init(motorMaxThrusts: MotorMaxThrusts) {

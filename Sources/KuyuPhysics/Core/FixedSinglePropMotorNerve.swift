@@ -1,7 +1,7 @@
 import Foundation
 import KuyuCore
 
-public struct FixedSinglePropMotorNerve: MotorNerveEndpoint, MotorNerveTraceProvider {
+public struct FixedSinglePropMotorNerve: MotorNerveEndpoint, MotorNerveTraceProvider, Sendable {
     public struct Config: Sendable, Equatable {
         public let maxThrust: Double
         public let rateLimitPerSecond: Double

@@ -1,7 +1,7 @@
 import Foundation
 import KuyuCore
 
-public struct FixedQuadMotorNerve: MotorNerveEndpoint, MotorNerveTraceProvider {
+public struct FixedQuadMotorNerve: MotorNerveEndpoint, MotorNerveTraceProvider, Sendable {
     public struct Config: Sendable, Equatable {
         public let mixer: ReferenceQuadrotorMixer
         public let motorMaxThrusts: MotorMaxThrusts
