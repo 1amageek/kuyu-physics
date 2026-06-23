@@ -191,7 +191,30 @@ public struct RoArmM1ServoCommandEncoder: Sendable {
                 throw EncodingError.invalidActuatorIndex(expected: expected, actual: actual)
             }
         }
-        return try command(forRadians: sorted.map(\.value))
+        var positions: [Int] = []
+        positions.reserveCapacity(Self.jointCount)
+        for (index, value) in sorted.enumerated() {
+            guard value.value.isFinite else {
+                throw EncodingError.nonFinite("actuator[\(index)]")
+            }
+            let jointRadians = Self.jointRadians(forActuatorPosition: value.value, joint: index)
+            let limit = jointLimits[index]
+            guard limit.contains(jointRadians) else {
+                throw EncodingError.outOfRange(
+                    joint: index + 1,
+                    value: jointRadians,
+                    min: limit.lowerBound,
+                    max: limit.upperBound
+                )
+            }
+            positions.append(try Self.pulse(forActuatorPosition: value.value, joint: index))
+        }
+
+        return try RoArmM1ServoCommand(
+            positions: positions,
+            speeds: Array(repeating: speed, count: Self.jointCount),
+            accelerations: Array(repeating: acceleration, count: Self.jointCount)
+        )
     }
 
     public func commandData(forRadians radians: [Double]) throws -> Data {
@@ -227,6 +250,29 @@ public struct RoArmM1ServoCommandEncoder: Sendable {
             throw EncodingError.pulseOutOfRange(joint: joint + 1, pulse: pulse)
         }
         return pulse
+    }
+
+    private static func pulse(forActuatorPosition actuatorPosition: Double, joint: Int) throws -> Int {
+        guard joint >= 0, joint < jointCount else {
+            throw EncodingError.invalidActuatorIndex(expected: 0, actual: joint)
+        }
+        guard actuatorPosition.isFinite else {
+            throw EncodingError.nonFinite("actuator[\(joint)]")
+        }
+
+        let pulse = Int(
+            Double(servoCenter)
+            + (actuatorPosition / wavesharePi * servoScale)
+            + 0.5
+        )
+        guard pulseRange.contains(pulse) else {
+            throw EncodingError.pulseOutOfRange(joint: joint + 1, pulse: pulse)
+        }
+        return pulse
+    }
+
+    private static func jointRadians(forActuatorPosition actuatorPosition: Double, joint: Int) -> Double {
+        commandDirections[joint] * actuatorPosition / mechanicalReductionRatios[joint]
     }
 
     private static func jsonData(_ command: RoArmM1ServoCommand) throws -> Data {

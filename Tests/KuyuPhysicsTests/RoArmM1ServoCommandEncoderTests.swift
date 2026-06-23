@@ -31,6 +31,15 @@ import KuyuPhysics
     #expect(command.positions == [1791, 1279, 1791, 2303, 1791])
     #expect(command.speeds == [12, 12, 12, 12, 12])
     #expect(command.accelerations == [34, 34, 34, 34, 34])
+
+    let actuatorCommand = try encoder.command(forActuatorValues: [
+        try ActuatorValue(index: ActuatorIndex(0), value: -Double.pi / 8.0),
+        try ActuatorValue(index: ActuatorIndex(1), value: -3.0 * Double.pi / 8.0),
+        try ActuatorValue(index: ActuatorIndex(2), value: -Double.pi / 8.0),
+        try ActuatorValue(index: ActuatorIndex(3), value: Double.pi / 8.0),
+        try ActuatorValue(index: ActuatorIndex(4), value: -Double.pi / 8.0)
+    ])
+    #expect(actuatorCommand.positions == command.positions)
     #expect(RoArmM1ServoCommandEncoder.commandDirections == [-1.0, -1.0, -1.0, 1.0, -1.0])
     #expect(RoArmM1ServoCommandEncoder.mechanicalReductionRatios == [1.0, 3.0, 1.0, 1.0, 1.0])
 }
