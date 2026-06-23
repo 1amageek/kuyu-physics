@@ -45,6 +45,61 @@ import Testing
     assertQuaternionApproximatelyEqual(tip.orientation, QuaternionSnapshot(orientation: expectedTipOrientation), tolerance: 1e-12)
 }
 
+@Test(.timeLimit(.minutes(1))) func articulatedSnapshotPreservesBranchedUnorderedJointGraph() async throws {
+    let leftAngle = 0.5
+    let rightSlide = 0.25
+    let fixedPitch = -0.2
+    let request = ArticulatedRigidBodySimulationRequest(
+        body: articulatedBranchedSnapshotBody(
+            leftAngle: leftAngle,
+            rightSlide: rightSlide,
+            fixedPitch: fixedPitch
+        ),
+        world: articulatedSnapshotWorld(),
+        embodiment: articulatedBranchedSnapshotEmbodiment(
+            leftAngle: leftAngle,
+            rightSlide: rightSlide
+        ),
+        determinism: try DeterminismConfig(tier: .tier0),
+        duration: 0.01,
+        timeStep: try TimeStep(delta: 0.01)
+    )
+
+    let log = try await ArticulatedRigidBodySimulator().run(
+        request: request,
+        driveProvider: FixedArticulatedDriveProvider(activations: [rightSlide, leftAngle])
+    )
+    let step = try #require(log.events.last)
+    let snapshots = Dictionary(uniqueKeysWithValues: step.plantState.bodies.map { ($0.id, $0) })
+    let left = try #require(snapshots["left"])
+    let leftTip = try #require(snapshots["left_tip"])
+    let right = try #require(snapshots["right"])
+
+    let leftOrientation = simd_quatd(angle: leftAngle, axis: SIMD3<Double>(0, 0, 1))
+    let expectedLeftPosition = SIMD3<Double>(1, 0, 0)
+    let expectedLeftTipPosition = expectedLeftPosition + leftOrientation.act(SIMD3<Double>(0, 1, 0))
+    let expectedLeftTipOrientation = (
+        leftOrientation * simd_quatd(angle: fixedPitch, axis: SIMD3<Double>(0, 1, 0))
+    ).normalizedQuat
+    let expectedRightPosition = SIMD3<Double>(0, -1 + rightSlide, 0)
+
+    #expect(Set(step.plantState.bodies.map(\.id)) == Set(["right", "left", "left_tip"]))
+    assertAxisApproximatelyEqual(left.position, axis3(expectedLeftPosition), tolerance: 1e-12)
+    assertQuaternionApproximatelyEqual(left.orientation, QuaternionSnapshot(orientation: leftOrientation), tolerance: 1e-12)
+    assertAxisApproximatelyEqual(leftTip.position, axis3(expectedLeftTipPosition), tolerance: 1e-12)
+    assertQuaternionApproximatelyEqual(
+        leftTip.orientation,
+        QuaternionSnapshot(orientation: expectedLeftTipOrientation),
+        tolerance: 1e-12
+    )
+    assertAxisApproximatelyEqual(right.position, axis3(expectedRightPosition), tolerance: 1e-12)
+    assertQuaternionApproximatelyEqual(
+        right.orientation,
+        QuaternionSnapshot(w: 1, x: 0, y: 0, z: 0),
+        tolerance: 1e-12
+    )
+}
+
 @Test(.timeLimit(.minutes(1))) func articulatedSimulatorAcceptsExternalDriveProvider() async throws {
     let body = articulatedSnapshotBody(
         shoulderPosition: 0.2,
@@ -729,6 +784,98 @@ private func articulatedSnapshotBody(
     )
 }
 
+private func articulatedBranchedSnapshotBody(
+    leftAngle: Double,
+    rightSlide: Double,
+    fixedPitch: Double
+) -> KuyuBodyModel {
+    KuyuBodyModel(
+        schemaVersion: "kuyu.body.v1",
+        bodyID: "articulated-branched-snapshot-body",
+        name: "Articulated Branched Snapshot Body",
+        category: "manipulator",
+        frames: [
+            FrameDefinition(id: "left-output", parentID: "base", pose: KuyuPose()),
+            FrameDefinition(id: "right-output", parentID: "base", pose: KuyuPose())
+        ],
+        links: [
+            articulatedLink(id: "base", mass: 1),
+            articulatedLink(id: "left", mass: 0.4),
+            articulatedLink(id: "left_tip", mass: 0.1),
+            articulatedLink(id: "right", mass: 0.2)
+        ],
+        joints: [
+            JointDefinition(
+                id: "left_tip_fixed",
+                kind: .fixed,
+                parentLinkID: "left",
+                childLinkID: "left_tip",
+                origin: KuyuPose(
+                    xyz: KuyuVector3(x: 0, y: 1, z: 0),
+                    rpy: KuyuVector3(x: 0, y: fixedPitch, z: 0)
+                ),
+                axis: KuyuVector3(x: 0, y: 0, z: 0)
+            ),
+            JointDefinition(
+                id: "right_slide",
+                kind: .prismatic,
+                parentLinkID: "base",
+                childLinkID: "right",
+                origin: KuyuPose(xyz: KuyuVector3(x: 0, y: -1, z: 0)),
+                axis: KuyuVector3(x: 0, y: 1, z: 0),
+                lowerLimit: rightSlide,
+                upperLimit: rightSlide,
+                effortLimit: 1_000,
+                velocityLimit: 1_000,
+                homePosition: rightSlide
+            ),
+            JointDefinition(
+                id: "left_yaw",
+                kind: .revolute,
+                parentLinkID: "base",
+                childLinkID: "left",
+                origin: KuyuPose(xyz: KuyuVector3(x: 1, y: 0, z: 0)),
+                axis: KuyuVector3(x: 0, y: 0, z: 1),
+                lowerLimit: leftAngle,
+                upperLimit: leftAngle,
+                effortLimit: 1_000,
+                velocityLimit: 1_000,
+                homePosition: leftAngle
+            )
+        ],
+        actuatorMounts: [
+            ActuatorMount(
+                actuatorID: "right-actuator",
+                parentLinkID: "base",
+                frameID: "right-output",
+                pose: KuyuPose(),
+                outputAxis: KuyuVector3(x: 0, y: 1, z: 0)
+            ),
+            ActuatorMount(
+                actuatorID: "left-actuator",
+                parentLinkID: "base",
+                frameID: "left-output",
+                pose: KuyuPose(),
+                outputAxis: KuyuVector3(x: 0, y: 0, z: 1)
+            )
+        ],
+        actuatorAttachments: [
+            ActuatorAttachment(
+                actuatorID: "right-actuator",
+                jointID: "right_slide",
+                torqueLimit: 1_000,
+                mountFrameID: "right-output"
+            ),
+            ActuatorAttachment(
+                actuatorID: "left-actuator",
+                jointID: "left_yaw",
+                torqueLimit: 1_000,
+                mountFrameID: "left-output"
+            )
+        ]
+    )
+}
+
 private func articulatedLink(id: String, mass: Double) -> LinkDefinition {
     LinkDefinition(
         id: id,
@@ -1218,6 +1365,75 @@ private func articulatedTwoAxisContactEmbodiment() -> EmbodimentContract {
                 type: .direct,
                 inputs: ["drive.heavy", "drive.light"],
                 outputs: ["actuator.heavy", "actuator.light"]
+            )
+        ])
+    )
+}
+
+private func articulatedBranchedSnapshotEmbodiment(
+    leftAngle: Double,
+    rightSlide: Double
+) -> EmbodimentContract {
+    EmbodimentContract(
+        schemaVersion: "embodiment.contract.v1",
+        contractID: "articulated-branched-snapshot-contract",
+        bodyID: "articulated-branched-snapshot-body",
+        signals: SignalCatalog(
+            sensor: [],
+            actuator: [
+                SignalDefinition(id: "actuator.right", index: 0, name: "Right actuator", units: "m"),
+                SignalDefinition(id: "actuator.left", index: 1, name: "Left actuator", units: "rad")
+            ],
+            drive: [
+                SignalDefinition(
+                    id: "drive.right",
+                    index: 0,
+                    name: "Right drive",
+                    units: "m",
+                    range: ScalarRange(min: rightSlide, max: rightSlide)
+                ),
+                SignalDefinition(
+                    id: "drive.left",
+                    index: 1,
+                    name: "Left drive",
+                    units: "rad",
+                    range: ScalarRange(min: leftAngle, max: leftAngle)
+                )
+            ],
+            reflex: [
+                SignalDefinition(id: "reflex.right", index: 0, name: "Right reflex", units: "m"),
+                SignalDefinition(id: "reflex.left", index: 1, name: "Left reflex", units: "rad")
+            ]
+        ),
+        sensors: [],
+        actuators: [
+            ActuatorDefinition(
+                id: "right-actuator",
+                type: "linear-servo",
+                frameID: "right-output",
+                channels: ["actuator.right"],
+                limits: ActuatorLimits(min: rightSlide, max: rightSlide, rateLimitPerSecond: 1_000),
+                dynamics: ActuatorDynamics(timeConstantSeconds: 0.001, deadzone: 0, torqueLimit: 1_000)
+            ),
+            ActuatorDefinition(
+                id: "left-actuator",
+                type: "servo",
+                frameID: "left-output",
+                channels: ["actuator.left"],
+                limits: ActuatorLimits(min: leftAngle, max: leftAngle, rateLimitPerSecond: 1_000),
+                dynamics: ActuatorDynamics(timeConstantSeconds: 0.001, deadzone: 0, torqueLimit: 1_000)
+            )
+        ],
+        control: ControlContract(
+            driveChannels: ["drive.right", "drive.left"],
+            reflexChannels: ["reflex.right", "reflex.left"]
+        ),
+        motorNerve: MotorNerveContract(stages: [
+            MotorNerveStageDefinition(
+                id: "direct",
+                type: .direct,
+                inputs: ["drive.right", "drive.left"],
+                outputs: ["actuator.right", "actuator.left"]
             )
         ])
     )

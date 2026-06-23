@@ -162,6 +162,28 @@ import Testing
     }
 }
 
+@Test func readinessRejectsHighDimensionalPlantWithMissingActuatorDynamics() throws {
+    let fixture = highDimensionalFixture(
+        jointCount: 48,
+        mixedJointKinds: true,
+        nonZeroHomePositions: true
+    )
+    let invalidEmbodiment = highDimensionalEmbodimentDroppingDynamics(
+        fixture.embodiment,
+        actuatorID: "actuator_31"
+    )
+
+    #expect(throws: KuyuModelValidationError.empty("readiness.dynamic.actuators.actuator_31.dynamics")) {
+        _ = try ReadinessGate().validate(
+            body: fixture.body,
+            world: fixture.world,
+            embodiment: invalidEmbodiment,
+            report: nil,
+            requiredLevel: .dynamicSimulation
+        )
+    }
+}
+
 @Test(.timeLimit(.minutes(1))) func articulatedSimulatorFortyEightAxisMixedReplayIsByteStable() async throws {
     let fixture = highDimensionalFixture(
         jointCount: 48,
@@ -422,6 +444,35 @@ private func highDimensionalFixture(
         jointRanges: jointRanges,
         homePositions: homePositions,
         targets: targets
+    )
+}
+
+private func highDimensionalEmbodimentDroppingDynamics(
+    _ embodiment: EmbodimentContract,
+    actuatorID: String
+) -> EmbodimentContract {
+    let actuators = embodiment.actuators.map { actuator in
+        guard actuator.id == actuatorID else { return actuator }
+        return ActuatorDefinition(
+            id: actuator.id,
+            type: actuator.type,
+            frameID: actuator.frameID,
+            channels: actuator.channels,
+            limits: actuator.limits,
+            dynamics: nil,
+            swapProfile: actuator.swapProfile
+        )
+    }
+    return EmbodimentContract(
+        schemaVersion: embodiment.schemaVersion,
+        contractID: embodiment.contractID,
+        bodyID: embodiment.bodyID,
+        signals: embodiment.signals,
+        sensors: embodiment.sensors,
+        actuators: actuators,
+        control: embodiment.control,
+        observation: embodiment.observation,
+        motorNerve: embodiment.motorNerve
     )
 }
 
