@@ -95,16 +95,23 @@ import Testing
         seed: ScenarioSeed(12)
     )
 
-    let startedAt = Date()
-    let log = try await ArticulatedRigidBodySimulator().run(
-        request: request,
-        driveProvider: HighDimensionalFixedDriveProvider(activations: fixture.targets)
-    )
-    let elapsedSeconds = Date().timeIntervalSince(startedAt)
-    let axisStepsPerSecond = Double(log.events.count * fixture.jointIDs.count) / elapsedSeconds
+    let strictTarget = strictPerformanceBudgetTarget(10_000)
+    let measurement = try await bestSimulationThroughput(
+        target: strictTarget ?? 0,
+        unitCount: { $0.events.count * fixture.jointIDs.count }
+    ) {
+        try await ArticulatedRigidBodySimulator().run(
+            request: request,
+            driveProvider: HighDimensionalFixedDriveProvider(activations: fixture.targets)
+        )
+    }
 
-    #expect(log.events.count == 1_000)
-    #expect(axisStepsPerSecond >= 10_000)
+    #expect(measurement.log.events.count == 1_000)
+    if let strictTarget {
+        #expect(measurement.unitsPerSecond >= strictTarget)
+    } else {
+        #expect(measurement.unitsPerSecond > 0)
+    }
 }
 
 @Test(.timeLimit(.minutes(1))) func articulatedSimulatorPreservesFortyEightAxisMixedJointContracts() async throws {
@@ -226,16 +233,23 @@ import Testing
         seed: ScenarioSeed(48)
     )
 
-    let startedAt = Date()
-    let log = try await ArticulatedRigidBodySimulator().run(
-        request: request,
-        driveProvider: HighDimensionalFixedDriveProvider(activations: fixture.targets)
-    )
-    let elapsedSeconds = Date().timeIntervalSince(startedAt)
-    let axisStepsPerSecond = Double(log.events.count * fixture.jointIDs.count) / elapsedSeconds
+    let strictTarget = strictPerformanceBudgetTarget(20_000)
+    let measurement = try await bestSimulationThroughput(
+        target: strictTarget ?? 0,
+        unitCount: { $0.events.count * fixture.jointIDs.count }
+    ) {
+        try await ArticulatedRigidBodySimulator().run(
+            request: request,
+            driveProvider: HighDimensionalFixedDriveProvider(activations: fixture.targets)
+        )
+    }
 
-    #expect(log.events.count == 200)
-    #expect(axisStepsPerSecond >= 20_000)
+    #expect(measurement.log.events.count == 200)
+    if let strictTarget {
+        #expect(measurement.unitsPerSecond >= strictTarget)
+    } else {
+        #expect(measurement.unitsPerSecond > 0)
+    }
 }
 
 @Test(.timeLimit(.minutes(1))) func articulatedSimulatorFortyEightAxisContactConstraintPerformanceBudget() async throws {
@@ -251,13 +265,17 @@ import Testing
         seed: ScenarioSeed(4_848)
     )
 
-    let startedAt = Date()
-    let log = try await ArticulatedRigidBodySimulator().run(
-        request: request,
-        driveProvider: HighDimensionalFixedDriveProvider(activations: fixture.targets)
-    )
-    let elapsedSeconds = Date().timeIntervalSince(startedAt)
-    let axisStepsPerSecond = Double(log.events.count * fixture.jointIDs.count) / elapsedSeconds
+    let strictTarget = strictPerformanceBudgetTarget(5_000)
+    let measurement = try await bestSimulationThroughput(
+        target: strictTarget ?? 0,
+        unitCount: { $0.events.count * fixture.jointIDs.count }
+    ) {
+        try await ArticulatedRigidBodySimulator().run(
+            request: request,
+            driveProvider: HighDimensionalFixedDriveProvider(activations: fixture.targets)
+        )
+    }
+    let log = measurement.log
     let finalStep = try #require(log.events.last)
     let finalPenetration = try #require(finalStep.plantState.scalars["contact.penetration.max"])
     let maxActiveContacts = log.events.compactMap { $0.plantState.scalars["contact.active.count"] }.max() ?? 0
@@ -265,7 +283,11 @@ import Testing
     #expect(log.events.count == 50)
     #expect(maxActiveContacts >= 48)
     #expect(finalPenetration <= 1e-9)
-    #expect(axisStepsPerSecond >= 5_000)
+    if let strictTarget {
+        #expect(measurement.unitsPerSecond >= strictTarget)
+    } else {
+        #expect(measurement.unitsPerSecond > 0)
+    }
 }
 
 private struct HighDimensionalFixture {

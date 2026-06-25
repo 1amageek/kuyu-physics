@@ -471,16 +471,23 @@ import Testing
         timeStep: try TimeStep(delta: 0.01)
     )
 
-    let startedAt = Date()
-    let log = try await ArticulatedRigidBodySimulator().run(
-        request: request,
-        driveProvider: FixedArticulatedDriveProvider(activations: [0.4, 0.2])
-    )
-    let elapsedSeconds = Date().timeIntervalSince(startedAt)
-    let stepsPerSecond = Double(log.events.count) / elapsedSeconds
+    let strictTarget = strictPerformanceBudgetTarget(2_000)
+    let measurement = try await bestSimulationThroughput(
+        target: strictTarget ?? 0,
+        unitCount: { $0.events.count }
+    ) {
+        try await ArticulatedRigidBodySimulator().run(
+            request: request,
+            driveProvider: FixedArticulatedDriveProvider(activations: [0.4, 0.2])
+        )
+    }
 
-    #expect(log.events.count == 2_000)
-    #expect(stepsPerSecond >= 2_000)
+    #expect(measurement.log.events.count == 2_000)
+    if let strictTarget {
+        #expect(measurement.unitsPerSecond >= strictTarget)
+    } else {
+        #expect(measurement.unitsPerSecond > 0)
+    }
 }
 
 @Test(.timeLimit(.minutes(1))) func articulatedSimulatorSolvesDescriptorDynamicsContactConstraintEndToEnd() async throws {

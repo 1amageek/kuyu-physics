@@ -215,6 +215,9 @@ public struct ArticulatedRigidBodySimulator: Sendable {
             logs.append(log)
 
             if (step % 20) == 0 {
+                try Task.checkCancellation()
+            }
+            if (step % 200) == 0 || (control != nil && (step % 20) == 0) {
                 await Task.yield()
             }
         }

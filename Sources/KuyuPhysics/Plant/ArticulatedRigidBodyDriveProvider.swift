@@ -19,7 +19,7 @@ public struct ArticulatedRigidBodyDriveProviderResetContext: Sendable, Equatable
     }
 }
 
-public protocol ArticulatedRigidBodyDriveProvider: Sendable {
+public protocol ArticulatedRigidBodyDriveProvider {
     var providerID: String { get }
 
     mutating func reset(context: ArticulatedRigidBodyDriveProviderResetContext) throws
