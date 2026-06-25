@@ -28,13 +28,7 @@ public struct MotorThrusts: Sendable, Codable, Equatable {
         self.f4 = f4
     }
 
-    public static let zero: MotorThrusts = {
-        do {
-            return try MotorThrusts(f1: 0, f2: 0, f3: 0, f4: 0)
-        } catch {
-            preconditionFailure("Invalid zero thrusts: \(error)")
-        }
-    }()
+    public static let zero = MotorThrusts(uncheckedF1: 0, uncheckedF2: 0, uncheckedF3: 0, uncheckedF4: 0)
 
     public static func uniform(_ value: Double) throws -> MotorThrusts {
         try MotorThrusts(f1: value, f2: value, f3: value, f4: value)
@@ -42,5 +36,29 @@ public struct MotorThrusts: Sendable, Codable, Equatable {
 
     public func asArray() -> [Double] {
         [f1, f2, f3, f4]
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case f1
+        case f2
+        case f3
+        case f4
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            f1: try container.decode(Double.self, forKey: .f1),
+            f2: try container.decode(Double.self, forKey: .f2),
+            f3: try container.decode(Double.self, forKey: .f3),
+            f4: try container.decode(Double.self, forKey: .f4)
+        )
+    }
+
+    private init(uncheckedF1 f1: Double, uncheckedF2 f2: Double, uncheckedF3 f3: Double, uncheckedF4 f4: Double) {
+        self.f1 = f1
+        self.f2 = f2
+        self.f3 = f3
+        self.f4 = f4
     }
 }

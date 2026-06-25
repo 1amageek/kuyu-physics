@@ -46,31 +46,52 @@ public struct AerodynamicsParameters: Sendable, Equatable, Codable {
         self.angularDrag = angularDrag
     }
 
-    public static let zero: AerodynamicsParameters = {
-        do {
-            return try AerodynamicsParameters(
-                dragCoefficient: 0,
-                referenceArea: 0,
-                liftCoefficient: 0,
-                bodyVolume: 0,
-                angularDrag: Axis3(x: 0, y: 0, z: 0)
-            )
-        } catch {
-            preconditionFailure("Invalid zero aerodynamics parameters: \(error)")
-        }
-    }()
+    public static let zero = AerodynamicsParameters(
+        uncheckedDragCoefficient: 0,
+        uncheckedReferenceArea: 0,
+        uncheckedLiftCoefficient: 0,
+        uncheckedBodyVolume: 0,
+        uncheckedAngularDrag: Axis3(x: 0, y: 0, z: 0)
+    )
 
-    public static let baseline: AerodynamicsParameters = {
-        do {
-            return try AerodynamicsParameters(
-                dragCoefficient: 1.1,
-                referenceArea: 0.05,
-                liftCoefficient: 0.2,
-                bodyVolume: 0.003,
-                angularDrag: Axis3(x: 0.02, y: 0.02, z: 0.04)
-            )
-        } catch {
-            preconditionFailure("Invalid baseline aerodynamics parameters: \(error)")
-        }
-    }()
+    public static let baseline = AerodynamicsParameters(
+        uncheckedDragCoefficient: 1.1,
+        uncheckedReferenceArea: 0.05,
+        uncheckedLiftCoefficient: 0.2,
+        uncheckedBodyVolume: 0.003,
+        uncheckedAngularDrag: Axis3(x: 0.02, y: 0.02, z: 0.04)
+    )
+
+    private enum CodingKeys: String, CodingKey {
+        case dragCoefficient
+        case referenceArea
+        case liftCoefficient
+        case bodyVolume
+        case angularDrag
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            dragCoefficient: try container.decode(Double.self, forKey: .dragCoefficient),
+            referenceArea: try container.decode(Double.self, forKey: .referenceArea),
+            liftCoefficient: try container.decode(Double.self, forKey: .liftCoefficient),
+            bodyVolume: try container.decode(Double.self, forKey: .bodyVolume),
+            angularDrag: try container.decode(Axis3.self, forKey: .angularDrag)
+        )
+    }
+
+    private init(
+        uncheckedDragCoefficient dragCoefficient: Double,
+        uncheckedReferenceArea referenceArea: Double,
+        uncheckedLiftCoefficient liftCoefficient: Double,
+        uncheckedBodyVolume bodyVolume: Double,
+        uncheckedAngularDrag angularDrag: Axis3
+    ) {
+        self.dragCoefficient = dragCoefficient
+        self.referenceArea = referenceArea
+        self.liftCoefficient = liftCoefficient
+        self.bodyVolume = bodyVolume
+        self.angularDrag = angularDrag
+    }
 }

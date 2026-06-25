@@ -90,7 +90,7 @@ public struct ReferenceQuadrotorPlantEngine: PlantEngine {
         return PlantStateSnapshot(root: root)
     }
 
-    public func safetyTrace() -> SafetyTrace {
-        SafetyTrace(root: snapshot().root)
+    public func safetyTrace() throws -> SafetyTrace {
+        try SafetyTrace(root: snapshot().root)
     }
 }

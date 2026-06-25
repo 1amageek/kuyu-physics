@@ -56,22 +56,16 @@ public struct ReferenceQuadrotorParameters: Sendable, Equatable, Codable {
         self.aerodynamics = aerodynamics
     }
 
-    public static let baseline: ReferenceQuadrotorParameters = {
-        do {
-            return try ReferenceQuadrotorParameters(
-                mass: 1.0,
-                inertia: Axis3(x: 0.005, y: 0.005, z: 0.009),
-                armLength: 0.12,
-                motorTimeConstant: 0.030,
-                maxThrust: 6.0,
-                yawCoefficient: 0.020,
-                gravity: 9.80665,
-                aerodynamics: .baseline
-            )
-        } catch {
-            preconditionFailure("Invalid baseline quadrotor parameters: \(error)")
-        }
-    }()
+    public static let baseline = ReferenceQuadrotorParameters(
+        uncheckedMass: 1.0,
+        uncheckedInertia: Axis3(x: 0.005, y: 0.005, z: 0.009),
+        uncheckedArmLength: 0.12,
+        uncheckedMotorTimeConstant: 0.030,
+        uncheckedMaxThrust: 6.0,
+        uncheckedYawCoefficient: 0.020,
+        uncheckedGravity: 9.80665,
+        uncheckedAerodynamics: .baseline
+    )
 
     public static func reference(
         from inertial: PlantInertialProperties,
@@ -94,5 +88,50 @@ public struct ReferenceQuadrotorParameters: Sendable, Equatable, Codable {
 
     public var inertiaSIMD: SIMD3<Double> {
         SIMD3<Double>(inertia.x, inertia.y, inertia.z)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case mass
+        case inertia
+        case armLength
+        case motorTimeConstant
+        case maxThrust
+        case yawCoefficient
+        case gravity
+        case aerodynamics
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            mass: try container.decode(Double.self, forKey: .mass),
+            inertia: try container.decode(Axis3.self, forKey: .inertia),
+            armLength: try container.decode(Double.self, forKey: .armLength),
+            motorTimeConstant: try container.decode(Double.self, forKey: .motorTimeConstant),
+            maxThrust: try container.decode(Double.self, forKey: .maxThrust),
+            yawCoefficient: try container.decode(Double.self, forKey: .yawCoefficient),
+            gravity: try container.decode(Double.self, forKey: .gravity),
+            aerodynamics: try container.decode(AerodynamicsParameters.self, forKey: .aerodynamics)
+        )
+    }
+
+    private init(
+        uncheckedMass mass: Double,
+        uncheckedInertia inertia: Axis3,
+        uncheckedArmLength armLength: Double,
+        uncheckedMotorTimeConstant motorTimeConstant: Double,
+        uncheckedMaxThrust maxThrust: Double,
+        uncheckedYawCoefficient yawCoefficient: Double,
+        uncheckedGravity gravity: Double,
+        uncheckedAerodynamics aerodynamics: AerodynamicsParameters
+    ) {
+        self.mass = mass
+        self.inertia = inertia
+        self.armLength = armLength
+        self.motorTimeConstant = motorTimeConstant
+        self.maxThrust = maxThrust
+        self.yawCoefficient = yawCoefficient
+        self.gravity = gravity
+        self.aerodynamics = aerodynamics
     }
 }

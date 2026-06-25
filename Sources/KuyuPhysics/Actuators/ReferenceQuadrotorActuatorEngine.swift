@@ -24,11 +24,7 @@ public struct ReferenceQuadrotorActuatorEngine: ActuatorEngine {
         if let motorMaxThrusts {
             self.motorMaxThrusts = motorMaxThrusts
         } else {
-            do {
-                self.motorMaxThrusts = try MotorMaxThrusts.uniform(parameters.maxThrust)
-            } catch {
-                preconditionFailure("Invalid motor max thrusts for parameters.maxThrust=\(parameters.maxThrust)")
-            }
+            self.motorMaxThrusts = MotorMaxThrusts.uncheckedUniform(parameters.maxThrust)
         }
         self.commanded = store.motorThrusts
     }

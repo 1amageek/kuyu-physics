@@ -44,19 +44,54 @@ public struct IMU6NoiseConfig: Sendable, Codable, Equatable {
         self.delaySteps = delaySteps
     }
 
-    public static let zero: IMU6NoiseConfig = {
-        do {
-            return try IMU6NoiseConfig(
-                gyroNoiseStdDev: 0,
-                gyroBias: 0,
-                gyroRandomWalkSigma: 0,
-                accelNoiseStdDev: 0,
-                accelBias: 0,
-                accelRandomWalkSigma: 0,
-                delaySteps: 0
-            )
-        } catch {
-            preconditionFailure("Invalid zero IMU noise config: \(error)")
-        }
-    }()
+    public static let zero = IMU6NoiseConfig(
+        uncheckedGyroNoiseStdDev: 0,
+        uncheckedGyroBias: 0,
+        uncheckedGyroRandomWalkSigma: 0,
+        uncheckedAccelNoiseStdDev: 0,
+        uncheckedAccelBias: 0,
+        uncheckedAccelRandomWalkSigma: 0,
+        uncheckedDelaySteps: 0
+    )
+
+    private enum CodingKeys: String, CodingKey {
+        case gyroNoiseStdDev
+        case gyroBias
+        case gyroRandomWalkSigma
+        case accelNoiseStdDev
+        case accelBias
+        case accelRandomWalkSigma
+        case delaySteps
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            gyroNoiseStdDev: try container.decode(Double.self, forKey: .gyroNoiseStdDev),
+            gyroBias: try container.decode(Double.self, forKey: .gyroBias),
+            gyroRandomWalkSigma: try container.decode(Double.self, forKey: .gyroRandomWalkSigma),
+            accelNoiseStdDev: try container.decode(Double.self, forKey: .accelNoiseStdDev),
+            accelBias: try container.decode(Double.self, forKey: .accelBias),
+            accelRandomWalkSigma: try container.decode(Double.self, forKey: .accelRandomWalkSigma),
+            delaySteps: try container.decode(UInt64.self, forKey: .delaySteps)
+        )
+    }
+
+    private init(
+        uncheckedGyroNoiseStdDev gyroNoiseStdDev: Double,
+        uncheckedGyroBias gyroBias: Double,
+        uncheckedGyroRandomWalkSigma gyroRandomWalkSigma: Double,
+        uncheckedAccelNoiseStdDev accelNoiseStdDev: Double,
+        uncheckedAccelBias accelBias: Double,
+        uncheckedAccelRandomWalkSigma accelRandomWalkSigma: Double,
+        uncheckedDelaySteps delaySteps: UInt64
+    ) {
+        self.gyroNoiseStdDev = gyroNoiseStdDev
+        self.gyroBias = gyroBias
+        self.gyroRandomWalkSigma = gyroRandomWalkSigma
+        self.accelNoiseStdDev = accelNoiseStdDev
+        self.accelBias = accelBias
+        self.accelRandomWalkSigma = accelRandomWalkSigma
+        self.delaySteps = delaySteps
+    }
 }

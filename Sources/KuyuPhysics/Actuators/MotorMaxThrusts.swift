@@ -32,6 +32,10 @@ public struct MotorMaxThrusts: Sendable, Codable, Equatable {
         try MotorMaxThrusts(f1: value, f2: value, f3: value, f4: value)
     }
 
+    static func uncheckedUniform(_ value: Double) -> MotorMaxThrusts {
+        MotorMaxThrusts(uncheckedF1: value, uncheckedF2: value, uncheckedF3: value, uncheckedF4: value)
+    }
+
     public func max(forIndex index: UInt32) -> Double {
         switch index {
         case 0: return f1
@@ -55,5 +59,29 @@ public struct MotorMaxThrusts: Sendable, Codable, Equatable {
         default:
             return self
         }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case f1
+        case f2
+        case f3
+        case f4
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            f1: try container.decode(Double.self, forKey: .f1),
+            f2: try container.decode(Double.self, forKey: .f2),
+            f3: try container.decode(Double.self, forKey: .f3),
+            f4: try container.decode(Double.self, forKey: .f4)
+        )
+    }
+
+    private init(uncheckedF1 f1: Double, uncheckedF2 f2: Double, uncheckedF3 f3: Double, uncheckedF4 f4: Double) {
+        self.f1 = f1
+        self.f2 = f2
+        self.f3 = f3
+        self.f4 = f4
     }
 }
