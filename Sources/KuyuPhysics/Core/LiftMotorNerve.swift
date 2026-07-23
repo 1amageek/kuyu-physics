@@ -1,10 +1,15 @@
 import KuyuCore
 
-public struct LiftMotorNerve: MotorNerveEndpoint, Sendable {
+public struct LiftMotorNerve: MotorNerveEndpoint, MotorNerveTraceProvider, Sendable {
     public let motorMaxThrusts: MotorMaxThrusts
+
+    public var lastTrace: MotorNerveTrace? { lastTraceStorage }
+
+    private var lastTraceStorage: MotorNerveTrace?
 
     public init(motorMaxThrusts: MotorMaxThrusts) {
         self.motorMaxThrusts = motorMaxThrusts
+        self.lastTraceStorage = nil
     }
 
     public mutating func update(
@@ -18,19 +23,27 @@ public struct LiftMotorNerve: MotorNerveEndpoint, Sendable {
         let adjusted = try applyCorrections(drives: drives, corrections: corrections)
         let throttle = driveValue(index: 0, from: adjusted)
         let clamped = clamp(throttle, lower: 0.0, upper: 1.0)
+        let normalized = telemetry.failsafeActive ? [0.0, 0.0, 0.0, 0.0] : [clamped, clamped, clamped, clamped]
         var commands: [ActuatorValue] = []
         commands.reserveCapacity(4)
         let scaled = [
-            clamped * motorMaxThrusts.f1,
-            clamped * motorMaxThrusts.f2,
-            clamped * motorMaxThrusts.f3,
-            clamped * motorMaxThrusts.f4
+            normalized[0] * motorMaxThrusts.f1,
+            normalized[1] * motorMaxThrusts.f2,
+            normalized[2] * motorMaxThrusts.f3,
+            normalized[3] * motorMaxThrusts.f4
         ]
         for (index, value) in scaled.enumerated() {
             let actuatorIndex = ActuatorIndex(UInt32(index))
             let command = try ActuatorValue(index: actuatorIndex, value: value)
             commands.append(command)
         }
+        lastTraceStorage = MotorNerveTrace(
+            uRaw: [throttle, throttle, throttle, throttle],
+            uSat: [clamped, clamped, clamped, clamped],
+            uRate: [clamped, clamped, clamped, clamped],
+            uOut: normalized,
+            failsafeActive: telemetry.failsafeActive
+        )
         return commands
     }
 

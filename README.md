@@ -6,6 +6,15 @@ Physics engines and analytical models for the Kuyu simulation environment.
 
 kuyu-physics provides concrete physics implementations that conform to kuyu-core protocols. It contains ODE-based rigid body dynamics, sensor models, actuator models, and the quadrotor reference plant.
 
+## Reliability Contract
+
+Package-local reliability milestones are defined in `RELIABILITY_MILESTONES.md`,
+with verification evidence recorded in `RELIABILITY_EVIDENCE.md`. The root
+individual reliability contract in `../INDIVIDUAL_RELIABILITY_MILESTONES.md`
+requires this package to remain independently verifiable through
+`TEST_TIMEOUT_SECONDS=180 ../scripts/test.sh kuyu-physics` before downstream
+scenario, training, MLX, or app work treats physics readiness as stable.
+
 ### Physics Engines
 
 - **`ReferenceQuadrotorPlantEngine`** — 6-DOF rigid body dynamics with RK4 integration, motor model, aerodynamics, drag, gravity, and gyroscopic effects.
@@ -31,6 +40,7 @@ The articulated simulator is treated as a deterministic virtualization substrate
 | Contact material readiness | `contactTraining` requires every collidable link material to define static friction, dynamic friction, and restitution. Missing coefficients fail readiness and runtime contact setup. |
 | Contact logging | Contact runs emit `contact.active.count`, `contact.penetration.max`, `contact.normalImpulse.max`, `contact.normalForce.max`, and `contact.solver.iterations` in `PlantStateSnapshot.scalars`. |
 | Constraint residual | Deterministic contact constraint projection is inverse-inertia weighted and must finish with residual penetration `<= world.solver.tolerance` or fail with `unresolvedContact`. |
+| Descriptor corpus acceptance | `DescriptorCorpusAcceptanceService` accepts typed robot descriptor bundles, validates readiness, performs deterministic replay for articulated, contact-training, and rigid actuator descriptors, records sorted-JSON byte stability, stores contact replay evidence for contact-training descriptors, and reports hardware-parity readiness gaps as typed evidence instead of hiding them in logs. Hardware-parity summaries persist calibration report ID, source, coverage counts, and canonical report hash. `DescriptorCorpusAcceptanceArtifactStore` persists and reloads accepted summaries through the same validation boundary, and `kuyu-training` project evidence packs can reference those summaries only when the saved physics artifact reloads to the same evidence. |
 | Unsupported physics | RK4 articulated worlds and unsupported contact frames/geometries fail fast. |
 | Determinism | Equal request, seed, and drive provider must produce equal `SimulationLog` values and sorted JSON bytes. |
 
@@ -56,8 +66,9 @@ The current verification suite includes 12-axis and 48-axis articulated chains w
 | 1-axis contact surface pose replay | World surface pose plus geometry pose must compose to the contact plane used by constraint projection |
 | 1-axis contact replay determinism | 100 repeated runs produce equal `SimulationLog` values and sorted JSON bytes |
 | 48-axis contact constraint replay | 2,400 contact axis-steps, at least 5,000 axis-steps/s under `xcodebuild test`, residual penetration `<= 1e-9 m` |
+| Descriptor corpus acceptance | RoArm M1-like articulated descriptors, contact/material training descriptors, 24-axis contact/material descriptors, and rigid actuator descriptors must pass readiness, deterministic replay, and sorted JSON byte stability while recording hardware-parity gaps when measured evidence is below `.hardwareParity`; a valid hardware-parity report must promote the same articulated descriptor to `.hardwareParity` and persist typed report provenance evidence; missing contact material coefficients must fail readiness before replay; contact-training summaries must persist active-contact replay evidence; saved acceptance summaries must round-trip through artifact validation while rejecting tampered replay or missing hardware-parity evidence. |
 
-The simulator precomputes joint dynamics invariants and snapshot/contact topology before stepping: mapped actuator envelopes, effective inertia, effort limits, servo stiffness/damping, friction, gravity lever terms, root links, deterministic joint traversal order, surface contact constraints, material pairs, and link ancestor paths. Runtime stepping then updates only the evolving state vectors, contact projections, and deterministic logs.
+The simulator precomputes joint dynamics invariants and snapshot/contact topology before stepping: mapped actuator envelopes, effective inertia, effort limits, servo stiffness/damping, friction, gravity lever terms, root links, deterministic joint traversal order, surface contact constraints, material pairs, and link ancestor paths. Runtime stepping then updates only the evolving state vectors, contact projections, and deterministic logs. The articulated runtime is split into request, public error shell, run loop, validation, descriptor binding, contact setup, logging, topology, and config-hash files so physics review can follow the same contracts the tests exercise. The contact solver is also split into setup, penalty force, constraint projection, contact evaluation, Jacobian mapping, geometry witness, material/surface validation, numeric helpers, and support types.
 
 ### Fusion Adapters
 
