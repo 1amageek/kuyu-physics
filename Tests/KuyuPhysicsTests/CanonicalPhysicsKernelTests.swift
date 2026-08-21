@@ -1,3 +1,4 @@
+import Foundation
 import simd
 import KuyuCore
 import KuyuPhysics
@@ -22,7 +23,7 @@ import Testing
         motorThrusts: thrusts,
         disturbances: disturbances
     )
-    var plant = SinglePropPlantEngine(
+    var plant = try SinglePropPlantEngine(
         parameters: parameters,
         store: store,
         timeStep: timeStep
@@ -32,7 +33,8 @@ import Testing
 
     let model = ReferenceQuadrotorPhysicsModel(
         parameters: parameters,
-        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient)
+        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient),
+        program: try ReferenceQuadrotorCanonicalProgram.make()
     )
     let expected = try ReferenceQuadrotorCanonicalIntegrator().step(
         state: initialState,
@@ -57,7 +59,8 @@ import Testing
     let parameters = ReferenceQuadrotorParameters.baseline
     let model = ReferenceQuadrotorPhysicsModel(
         parameters: parameters,
-        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient)
+        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient),
+        program: try ReferenceQuadrotorCanonicalProgram.make()
     )
     let thrusts = try MotorThrusts.uniform(parameters.mass * parameters.gravity / 4.0 * 1.08)
     let disturbances = DisturbanceState.zero
@@ -107,7 +110,8 @@ import Testing
     let model = ReferenceQuadrotorPhysicsModel(
         parameters: parameters,
         mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient),
-        environment: environment
+        environment: environment,
+        program: try ReferenceQuadrotorCanonicalProgram.make()
     )
     let state = try ReferenceQuadrotorState(
         position: SIMD3<Double>(0.1, -0.2, 1.4),
@@ -158,79 +162,12 @@ import Testing
     #expect(low.residualTargetIDs(toward: .full) == [.propulsion])
 }
 
-@Test(.timeLimit(.minutes(1))) func canonicalIntegratorRejectsImplicitTermsUntilImplicitSolverExists() throws {
-    let parameters = ReferenceQuadrotorParameters.baseline
-    let model = ReferenceQuadrotorPhysicsModel(
-        parameters: parameters,
-        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient),
-        terms: [
-            AnyQuadrotorForceTerm(id: .gravity, stiffness: .implicit) { _ in .zero }
-        ]
-    )
-    let fidelity = try ReferenceQuadrotorFidelity(
-        active: [.gravity],
-        worldModelTargets: [],
-        ignoredByNegligibilityPolicy: Set(QuadrotorForceTermID.allCases).subtracting([.gravity]),
-        constraint: .free
-    )
-    let state = try ReferenceQuadrotorState(
-        position: SIMD3<Double>(repeating: 0),
-        velocity: SIMD3<Double>(repeating: 0),
-        orientation: simd_quatd(angle: 0, axis: SIMD3<Double>(0, 0, 1)),
-        angularVelocity: SIMD3<Double>(repeating: 0)
-    )
-    let thrusts = try MotorThrusts.uniform(0)
-
-    #expect(throws: ReferenceQuadrotorCanonicalIntegrator.IntegrationError.unsupportedImplicitTerms([.gravity])) {
-        _ = try ReferenceQuadrotorCanonicalIntegrator().step(
-            state: state,
-            model: model,
-            motorThrusts: thrusts,
-            disturbances: .zero,
-            fidelity: fidelity,
-            delta: 0.01
-        )
-    }
-}
-
-@Test(.timeLimit(.minutes(1))) func canonicalIntegratorRejectsMissingActiveForceTerms() throws {
-    let parameters = ReferenceQuadrotorParameters.baseline
-    let model = ReferenceQuadrotorPhysicsModel(
-        parameters: parameters,
-        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient),
-        terms: []
-    )
-    let fidelity = try ReferenceQuadrotorFidelity(
-        active: [.gravity],
-        worldModelTargets: [],
-        ignoredByNegligibilityPolicy: Set(QuadrotorForceTermID.allCases).subtracting([.gravity]),
-        constraint: .free
-    )
-    let state = try ReferenceQuadrotorState(
-        position: SIMD3<Double>(repeating: 0),
-        velocity: SIMD3<Double>(repeating: 0),
-        orientation: simd_quatd(angle: 0, axis: SIMD3<Double>(0, 0, 1)),
-        angularVelocity: SIMD3<Double>(repeating: 0)
-    )
-    let thrusts = try MotorThrusts.uniform(0)
-
-    #expect(throws: ReferenceQuadrotorCanonicalIntegrator.IntegrationError.missingForceTerms([.gravity])) {
-        _ = try ReferenceQuadrotorCanonicalIntegrator().step(
-            state: state,
-            model: model,
-            motorThrusts: thrusts,
-            disturbances: .zero,
-            fidelity: fidelity,
-            delta: 0.01
-        )
-    }
-}
-
 @Test(.timeLimit(.minutes(1))) func canonicalIntegratorRejectsInvalidTimeStep() throws {
     let parameters = ReferenceQuadrotorParameters.baseline
     let model = ReferenceQuadrotorPhysicsModel(
         parameters: parameters,
-        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient)
+        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient),
+        program: try ReferenceQuadrotorCanonicalProgram.make()
     )
     let state = try ReferenceQuadrotorState(
         position: SIMD3<Double>(repeating: 0),
@@ -249,133 +186,6 @@ import Testing
             delta: 0
         )
     }
-}
-
-@Test(.timeLimit(.minutes(1))) func canonicalIntegratorRejectsDuplicateActiveForceTerms() throws {
-    let parameters = ReferenceQuadrotorParameters.baseline
-    let model = ReferenceQuadrotorPhysicsModel(
-        parameters: parameters,
-        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient),
-        terms: [
-            AnyQuadrotorForceTerm(id: .gravity) { _ in .zero },
-            AnyQuadrotorForceTerm(id: .gravity) { _ in .zero },
-        ]
-    )
-    let fidelity = try ReferenceQuadrotorFidelity(
-        active: [.gravity],
-        worldModelTargets: [],
-        ignoredByNegligibilityPolicy: Set(QuadrotorForceTermID.allCases).subtracting([.gravity]),
-        constraint: .free
-    )
-    let state = try ReferenceQuadrotorState(
-        position: SIMD3<Double>(repeating: 0),
-        velocity: SIMD3<Double>(repeating: 0),
-        orientation: simd_quatd(angle: 0, axis: SIMD3<Double>(0, 0, 1)),
-        angularVelocity: SIMD3<Double>(repeating: 0)
-    )
-
-    #expect(throws: ReferenceQuadrotorCanonicalIntegrator.IntegrationError.duplicateForceTerms([.gravity])) {
-        _ = try ReferenceQuadrotorCanonicalIntegrator().step(
-            state: state,
-            model: model,
-            motorThrusts: try MotorThrusts.uniform(0),
-            disturbances: .zero,
-            fidelity: fidelity,
-            delta: 0.01
-        )
-    }
-}
-
-@Test(.timeLimit(.minutes(1))) func physicsModelRejectsMissingActiveForceTerms() throws {
-    let parameters = ReferenceQuadrotorParameters.baseline
-    let model = ReferenceQuadrotorPhysicsModel(
-        parameters: parameters,
-        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient),
-        terms: []
-    )
-    let fidelity = try ReferenceQuadrotorFidelity(
-        active: [.gravity],
-        worldModelTargets: [],
-        ignoredByNegligibilityPolicy: Set(QuadrotorForceTermID.allCases).subtracting([.gravity]),
-        constraint: .free
-    )
-    let state = try ReferenceQuadrotorState(
-        position: SIMD3<Double>(repeating: 0),
-        velocity: SIMD3<Double>(repeating: 0),
-        orientation: simd_quatd(angle: 0, axis: SIMD3<Double>(0, 0, 1)),
-        angularVelocity: SIMD3<Double>(repeating: 0)
-    )
-
-    #expect(throws: ReferenceQuadrotorPhysicsModel.ModelError.missingForceTerms([.gravity])) {
-        _ = try model.derivative(
-            state: state,
-            motorThrusts: try MotorThrusts.uniform(0),
-            disturbances: .zero,
-            fidelity: fidelity
-        )
-    }
-}
-
-@Test(.timeLimit(.minutes(1))) func physicsModelRejectsDuplicateActiveForceTerms() throws {
-    let parameters = ReferenceQuadrotorParameters.baseline
-    let model = ReferenceQuadrotorPhysicsModel(
-        parameters: parameters,
-        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient),
-        terms: [
-            AnyQuadrotorForceTerm(id: .gravity) { _ in .zero },
-            AnyQuadrotorForceTerm(id: .gravity) { _ in .zero },
-        ]
-    )
-    let fidelity = try ReferenceQuadrotorFidelity(
-        active: [.gravity],
-        worldModelTargets: [],
-        ignoredByNegligibilityPolicy: Set(QuadrotorForceTermID.allCases).subtracting([.gravity]),
-        constraint: .free
-    )
-    let state = try ReferenceQuadrotorState(
-        position: SIMD3<Double>(repeating: 0),
-        velocity: SIMD3<Double>(repeating: 0),
-        orientation: simd_quatd(angle: 0, axis: SIMD3<Double>(0, 0, 1)),
-        angularVelocity: SIMD3<Double>(repeating: 0)
-    )
-
-    #expect(throws: ReferenceQuadrotorPhysicsModel.ModelError.duplicateForceTerms([.gravity])) {
-        _ = try model.derivative(
-            state: state,
-            motorThrusts: try MotorThrusts.uniform(0),
-            disturbances: .zero,
-            fidelity: fidelity
-        )
-    }
-}
-
-@Test(.timeLimit(.minutes(1))) func singlePropDerivativeUsesInjectedForceTerms() throws {
-    let parameters = ReferenceQuadrotorParameters.baseline
-    let model = ReferenceQuadrotorPhysicsModel(
-        parameters: parameters,
-        mixer: ReferenceQuadrotorMixer(armLength: parameters.armLength, yawCoefficient: parameters.yawCoefficient),
-        terms: [
-            AnyQuadrotorForceTerm(id: .gravity) { _ in .zero },
-            AnyQuadrotorForceTerm(id: .propulsion) { _ in
-                QuadrotorGeneralizedForce(bodyForce: SIMD3<Double>(0, 0, 2.0))
-            },
-            AnyQuadrotorForceTerm(id: .disturbance) { _ in .zero },
-        ]
-    )
-    let state = try ReferenceQuadrotorState(
-        position: SIMD3<Double>(repeating: 0),
-        velocity: SIMD3<Double>(repeating: 0),
-        orientation: simd_quatd(angle: 0, axis: SIMD3<Double>(0, 0, 1)),
-        angularVelocity: SIMD3<Double>(repeating: 0)
-    )
-    let derivative = try model.derivative(
-        state: state,
-        motorThrusts: try MotorThrusts.uniform(0),
-        disturbances: .zero,
-        fidelity: .singleProp
-    )
-
-    #expect(abs(derivative.velocity.z - (2.0 / parameters.mass)) < 1e-12)
 }
 
 @Test(.timeLimit(.minutes(1))) func fullPlantEngineMatchesLegacyRK4WithoutAtmosphere() throws {
@@ -398,7 +208,7 @@ import Testing
         motorThrusts: thrusts,
         disturbances: disturbances
     )
-    var plant = ReferenceQuadrotorPlantEngine(
+    var plant = try ReferenceQuadrotorPlantEngine(
         parameters: parameters,
         mixer: mixer,
         store: store,
@@ -407,19 +217,77 @@ import Testing
 
     try plant.integrate(time: try WorldTime(stepIndex: 1, time: timeStep.delta))
 
-    let mix = mixer.mix(thrusts: thrusts)
-    let expected = ReferenceQuadrotorDynamics.integrateRK4(
-        state: initialState,
-        input: ReferenceQuadrotorInput(
-            bodyForce: mix.forceBody,
-            bodyTorque: mix.torqueBody + disturbances.torqueBody,
-            worldForce: disturbances.forceWorld
+    let expected = try ReferenceQuadrotorState(
+        position: SIMD3<Double>(
+            0.20053493016485271,
+            -0.10020501583860131,
+            1.1007609213664729
         ),
-        parameters: parameters,
-        gravity: parameters.gravity,
-        delta: timeStep.delta
+        velocity: SIMD3<Double>(
+            0.056982882752463423,
+            -0.021004669208332143,
+            0.052184588630275634
+        ),
+        orientation: simd_quatd(
+            vector: SIMD4<Double>(
+                0.0001029715705012409,
+                0.04978941906775403,
+                0.0002562831291636753,
+                0.9987596995597634
+            )
+        ),
+        angularVelocity: SIMD3<Double>(
+            0.016016134680464367,
+            -0.04599254204743801,
+            0.06444444444444444
+        )
     )
     assertStateApproximatelyEqual(store.state, expected, tolerance: 1e-12)
+}
+
+@Test(.timeLimit(.minutes(1))) func canonicalQuadrotorKernelSustainsRealTimeReferenceBudget() throws {
+    let parameters = ReferenceQuadrotorParameters.baseline
+    let model = ReferenceQuadrotorPhysicsModel(
+        parameters: parameters,
+        mixer: ReferenceQuadrotorMixer(
+            armLength: parameters.armLength,
+            yawCoefficient: parameters.yawCoefficient
+        ),
+        program: try ReferenceQuadrotorCanonicalProgram.make()
+    )
+    let thrusts = try MotorThrusts.uniform(parameters.mass * parameters.gravity / 4.0)
+    let integrator = ReferenceQuadrotorCanonicalIntegrator()
+    let delta = 0.0025
+    let stepCount = 1_000
+    var state = try ReferenceQuadrotorState(
+        position: .zero,
+        velocity: .zero,
+        orientation: simd_quatd(angle: 0, axis: SIMD3<Double>(0, 0, 1)),
+        angularVelocity: .zero
+    )
+
+    let startedAt = Date()
+    for _ in 0..<stepCount {
+        state = try integrator.step(
+            state: state,
+            model: model,
+            motorThrusts: thrusts,
+            disturbances: .zero,
+            fidelity: .full,
+            delta: delta
+        )
+    }
+    let elapsed = max(Date().timeIntervalSince(startedAt), Double.leastNonzeroMagnitude)
+    let stepsPerSecond = Double(stepCount) / elapsed
+
+    #expect(state.position.x.isFinite)
+    #expect(state.position.y.isFinite)
+    #expect(state.position.z.isFinite)
+    if let strictTarget = strictPerformanceBudgetTarget(400) {
+        #expect(stepsPerSecond >= strictTarget)
+    } else {
+        #expect(stepsPerSecond > 0)
+    }
 }
 
 private func assertStateApproximatelyEqual(

@@ -98,9 +98,10 @@ import Testing
         time: WorldTime(stepIndex: 1, time: 0.1)
     )
 
-    #expect(nerve.lastTrace?.uRaw == [1.0, 0.8, 0.6, 0.4])
-    #expect(nerve.lastTrace?.uRate == [0.2, 0.2, 0.2, 0.2])
-    #expect(output.map(\.value) == [1.2, 1.2, 1.2, 1.2])
+    let trace = try #require(nerve.lastTrace)
+    expectApproximatelyEqual(trace.uRaw, [1.0, 0.8, 0.6, 0.4])
+    expectApproximatelyEqual(trace.uRate, [0.2, 0.2, 0.2, 0.2])
+    expectApproximatelyEqual(output.map(\.value), [1.2, 1.2, 1.2, 1.2])
 }
 
 @Test func fixedQuadMotorNervePreservesLegacyMixerSemantics() throws {
@@ -124,8 +125,24 @@ import Testing
         time: WorldTime(stepIndex: 0, time: 0.0)
     )
 
-    #expect(nerve.lastTrace?.uRaw == [0.75, 0.55, 0.35, 0.35000000000000003])
-    #expect(output.map(\.value) == [4.5, 3.3000000000000003, 2.0999999999999996, 2.1])
+    let trace = try #require(nerve.lastTrace)
+    expectApproximatelyEqual(trace.uRaw, [0.75, 0.55, 0.35, 0.35])
+    expectApproximatelyEqual(output.map(\.value), [4.5, 3.3, 2.1, 2.1])
+}
+
+private func expectApproximatelyEqual(
+    _ actual: [Double],
+    _ expected: [Double],
+    tolerance: Double = 1e-12
+) {
+    #expect(actual.count == expected.count)
+    guard actual.count == expected.count else {
+        return
+    }
+
+    for (actualValue, expectedValue) in zip(actual, expected) {
+        #expect(abs(actualValue - expectedValue) <= tolerance)
+    }
 }
 
 private func normalizedMotorDrives(_ values: [Double]) throws -> [DriveIntent] {

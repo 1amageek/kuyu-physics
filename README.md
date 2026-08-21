@@ -17,9 +17,32 @@ scenario, training, MLX, or app work treats physics readiness as stable.
 
 ### Physics Engines
 
-- **`ReferenceQuadrotorPlantEngine`** — 6-DOF rigid body dynamics with RK4 integration, motor model, aerodynamics, drag, gravity, and gyroscopic effects.
-- **`SinglePropPlantEngine`** — Simplified single-propeller dynamics for lift control.
+- **`ReferenceQuadrotorPlantEngine`** — 6-DOF rigid body dynamics evaluated from the validated canonical operation program with declared RK4 integration, motor mixing, aerodynamics, drag, gravity, and gyroscopic effects.
+- **`SinglePropPlantEngine`** — Vertical constrained fidelity over the same canonical quadrotor program.
 - **`ArticulatedRigidBodySimulator`** — Descriptor-driven articulated rigid body simulation for manipulator-style bodies.
+
+## Canonical Dynamics Program
+
+The reference quadrotor's force terms, state derivative, IMU observables,
+fidelity partitions, constraint projections, and RK4 stage contract are one
+closed SSA program. Program construction validates operand order, shapes,
+physical dimensions, differentiability propagation, output layouts, fidelity
+partitions, and explicit integration support before computing a canonical
+SHA-256 digest.
+
+```text
+CanonicalDynamicsProgram
+  -> ReferenceQuadrotorScalarDynamicsExecutor (Swift Float64 reference)
+      -> ReferenceQuadrotorPhysicsModel
+          -> ReferenceQuadrotorPlantEngine / SinglePropPlantEngine
+          -> IMU6SensorField
+```
+
+The current reference digest is
+`6c6773c5a824508fd683390aa7a4acdc1636e8c8483f6ac9ee9667bf62d54310`.
+Closure-backed force terms and duplicated sensor equations are not fallback
+paths. Future Mojo CPU, Metal, and CUDA executors must consume this program and
+qualify against the same digest and golden traces.
 
 ## Articulated Simulator Contracts
 

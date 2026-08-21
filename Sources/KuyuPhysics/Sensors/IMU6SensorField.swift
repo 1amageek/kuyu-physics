@@ -7,12 +7,19 @@ public struct IMU6SensorField: SensorField {
         case negative(String)
     }
 
-    public var parameters: ReferenceQuadrotorParameters
-    public var mixer: ReferenceQuadrotorMixer
+    public var parameters: ReferenceQuadrotorParameters {
+        didSet { rebuildModel() }
+    }
+    public var mixer: ReferenceQuadrotorMixer {
+        didSet { rebuildModel() }
+    }
     public var store: ReferenceQuadrotorWorldStore
     public var timeStep: TimeStep
-    public var environment: WorldEnvironment
+    public var environment: WorldEnvironment {
+        didSet { rebuildModel() }
+    }
 
+    private var model: ReferenceQuadrotorPhysicsModel
     private var gyroNoise: [AxisNoiseModel]
     private var accelNoise: [AxisNoiseModel]
     private var delayBuffer: SampleDelayBuffer
@@ -44,11 +51,18 @@ public struct IMU6SensorField: SensorField {
         guard accelNoiseStdDev >= 0 else { throw ValidationError.negative("accelNoiseStdDev") }
         guard accelRandomWalkSigma >= 0 else { throw ValidationError.negative("accelRandomWalkSigma") }
 
+        let program = try ReferenceQuadrotorCanonicalProgram.make()
         self.parameters = parameters
         self.mixer = mixer
         self.store = store
         self.timeStep = timeStep
         self.environment = environment
+        self.model = ReferenceQuadrotorPhysicsModel(
+            parameters: parameters,
+            mixer: mixer,
+            environment: environment,
+            program: program
+        )
         self.gyroNoise = [
             AxisNoiseModel(bias: gyroBias, noiseStdDev: gyroNoiseStdDev, randomWalkSigma: gyroRandomWalkSigma, seed: noiseSeed &+ 1),
             AxisNoiseModel(bias: gyroBias, noiseStdDev: gyroNoiseStdDev, randomWalkSigma: gyroRandomWalkSigma, seed: noiseSeed &+ 2),
@@ -63,63 +77,14 @@ public struct IMU6SensorField: SensorField {
     }
 
     public mutating func sample(time: WorldTime) throws -> [ChannelSample] {
-        let mix = mixer.mix(thrusts: store.motorThrusts)
-        var bodyForce = mix.forceBody
-        var worldForce = store.disturbances.forceWorld
-        let gravity = environment.effectiveGravity(defaultGravity: parameters.gravity)
-
-        if environment.usage.useAtmosphere {
-            let density = environment.airDensity()
-            let ratio = density / WorldEnvironment.seaLevelDensity
-            bodyForce *= ratio
-
-            let windVelocity = environment.usage.useWind ? environment.windVelocityWorld.simd : SIMD3<Double>(repeating: 0)
-            let airVelocity = store.state.velocity - windVelocity
-            let speed = simd_length(airVelocity)
-            let aero = parameters.aerodynamics
-
-            if speed > 0, aero.dragCoefficient > 0, aero.referenceArea > 0 {
-                let dragMagnitude = 0.5 * density * aero.dragCoefficient * aero.referenceArea * speed * speed
-                let drag = -dragMagnitude * (airVelocity / speed)
-                worldForce += drag
-            }
-
-            if aero.liftCoefficient > 0, aero.referenceArea > 0 {
-                let airVelocityBody = store.state.orientation.inverse.act(airVelocity)
-                let bodySpeed = simd_length(airVelocityBody)
-                if bodySpeed > 0 {
-                    let vHat = airVelocityBody / bodySpeed
-                    let bodyUp = SIMD3<Double>(0, 0, 1)
-                    let liftPlane = simd_cross(vHat, simd_cross(bodyUp, vHat))
-                    let liftPlaneMag = simd_length(liftPlane)
-                    if liftPlaneMag > 0 {
-                        let liftMagnitude = 0.5 * density * aero.liftCoefficient * aero.referenceArea * bodySpeed * bodySpeed
-                        let liftBody = liftPlane / liftPlaneMag * liftMagnitude
-                        worldForce += store.state.orientation.act(liftBody)
-                    }
-                }
-            }
-
-            if aero.bodyVolume > 0 {
-                let gravityWorld = SIMD3<Double>(0, 0, -gravity)
-                let buoyancy = -gravityWorld * (density * aero.bodyVolume)
-                worldForce += buoyancy
-            }
-        }
-
-        let input = ReferenceQuadrotorInput(
-            bodyForce: bodyForce,
-            bodyTorque: mix.torqueBody + store.disturbances.torqueBody,
-            worldForce: worldForce
-        )
-
-        let gyro = store.state.angularVelocity
-        let accel = ReferenceQuadrotorDynamics.specificForceBody(
+        let observables = try model.observables(
             state: store.state,
-            input: input,
-            parameters: parameters,
-            gravity: gravity
+            motorThrusts: store.motorThrusts,
+            disturbances: store.disturbances,
+            fidelity: .full
         )
+        let gyro = observables.angularVelocityBody
+        let accel = observables.specificForceBody
 
         let dt = timeStep.delta
 
@@ -146,5 +111,15 @@ public struct IMU6SensorField: SensorField {
         ]
 
         return delayBuffer.push(samples)
+    }
+
+    private mutating func rebuildModel() {
+        model = ReferenceQuadrotorPhysicsModel(
+            parameters: parameters,
+            mixer: mixer,
+            environment: environment,
+            program: model.program,
+            executor: model.executor
+        )
     }
 }

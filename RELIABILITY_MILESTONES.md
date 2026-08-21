@@ -51,7 +51,7 @@ and evidence all agree.
 | ID | Name | Status | Purpose | Completion gate |
 |---|---|---|---|---|
 | KP0 | Responsibility baseline | Complete for current package-local baseline | Keep `kuyu-physics` scoped to physics, descriptor import, readiness, deterministic replay, and hardware-parity evidence. | README boundary, package-local reliability docs, split body/world/manifest/readiness validation owners, root static gate, and package-level test. |
-| KP1 | Canonical quadrotor kernel | Complete for current reference and single-prop paths | Ensure fidelity rungs are views over one canonical quadrotor model rather than separate engines with drift. | Canonical kernel tests for force-term coverage, residual targets, single-prop projection, and invalid integrator/input rejection. |
+| KP1 | Canonical quadrotor kernel | Complete for the declarative Swift Float64 reference and single-prop paths | Ensure fidelity rungs, sensors, and future executors consume one digest-bound canonical program rather than separate equations that drift. | Closed opcode/layout/unit validation, fixed program digest, scalar golden traces, Plant/IMU cutover, fidelity/residual/projection tests, and a strict real-time reference budget. |
 | KP2 | Descriptor-driven articulated dynamics | Complete for current dynamic simulation paths | Ensure articulated simulation is driven by body/world/embodiment descriptors, not body-file order or hidden defaults. | Snapshot, actuator mapping, inertia, effort, timestep, provider ordering, split model validation files, and high-dimensional readiness tests. |
 | KP3 | Contact-training readiness | Complete for current deterministic contact paths | Ensure contact training requires declared materials, supported surfaces, contact evidence, and bounded residuals. | Contact-material readiness tests, penalty/constraint replay tests, contact residual tests, unsupported-contact rejection, and high-dimensional contact replay tests. |
 | KP4 | Descriptor corpus artifact | Complete for current bundled, fixture, loaded-robot producer, and split owner-file paths | Ensure descriptor-corpus acceptance can be saved, reloaded, and referenced by training without trusting in-memory state. | `DescriptorCorpusAcceptanceService`, split descriptor-corpus entry/summary/evidence/store/service files, `DescriptorCorpusAcceptanceArtifactStore`, `LoadedRobotDescriptorCorpusAcceptanceService`, positive/negative corpus tests, and project-evidence reload tests. |
@@ -81,22 +81,28 @@ Acceptance evidence:
 
 ## KP1: Canonical Quadrotor Kernel
 
-Status: complete for current reference and single-prop paths.
+Status: complete for the declarative Swift Float64 reference and single-prop
+paths. Mojo CPU/Metal/CUDA parity is a separate migration gate and is not part
+of this completion claim.
 
-All reference quadrotor fidelity rungs share the same canonical state, force-term
-registry, residual target semantics, and integrator boundary. Single-prop lift
-is a constrained view over the quadrotor canonical model, not an independent
-physics model.
+All reference quadrotor fidelity rungs and IMU observables share the same
+digest-bound SSA operation program, buffer layouts, force terms, derivative
+graph, observable graph, residual target semantics, and declared integration
+boundary. Single-prop lift is a constrained view over the quadrotor canonical
+program, not an independent physics model. The deleted closure registry and
+duplicated dynamics helpers are not production fallbacks.
 
 Acceptance evidence:
 
 | Invariant | Gate |
 |---|---|
+| Program content is closed, validated, canonically serialized, and digest-bound. | `referenceQuadrotorCanonicalProgramIsStableAndRoundTrips`, `canonicalProgramDecodeRejectsDigestMismatch`, `canonicalGraphValidationRejectsDimensionMismatch`, and `canonicalGraphValidationRejectsForwardReferences`. |
+| The Swift Float64 executor matches the former implementation's fixed force, derivative, observable, and RK4 traces. | `scalarExecutorMatchesGoldenForceTraceAcrossFidelities`, `scalarExecutorMatchesReferenceDerivativeAndObservables`, and `fullPlantEngineMatchesLegacyRK4WithoutAtmosphere`. |
 | Single-prop is a canonical vertical fidelity view. | `singlePropPlantUsesCanonicalVerticalFidelity`. |
 | Refinement nesting matches projected high-fidelity trajectories. | `refinementNestingMatchesProjectedHighFidelityTrajectory`. |
 | Residual targets equal the high/low force-term gap and exclude ignored terms. | `residualTargetEqualsHighLowForceGap` and `residualTargetExcludesIgnoredTerms`. |
-| Invalid canonical kernel construction fails closed. | Canonical integrator and physics-model rejection tests for implicit terms, missing/duplicate active force terms, and invalid timesteps. |
-| Full engine matches legacy RK4 under the current baseline. | `fullPlantEngineMatchesLegacyRK4WithoutAtmosphere`. |
+| Invalid canonical construction and integration fail closed. | Graph/program negative tests and `canonicalIntegratorRejectsInvalidTimeStep`. |
+| The production reference path exceeds its 400 Hz control-loop floor under the strict test mode. | `canonicalQuadrotorKernelSustainsRealTimeReferenceBudget` with `KUYU_PHYSICS_STRICT_PERFORMANCE_BUDGETS=1`. |
 
 ## KP2: Descriptor-Driven Articulated Dynamics
 

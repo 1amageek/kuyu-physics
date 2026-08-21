@@ -7,9 +7,6 @@ public struct ReferenceQuadrotorFidelity: Sendable, Equatable {
     public let active: Set<QuadrotorForceTermID>
     public let worldModelTargets: Set<QuadrotorForceTermID>
     public let ignoredByNegligibilityPolicy: Set<QuadrotorForceTermID>
-    public let activeMask: QuadrotorForceTermMask
-    public let worldModelTargetMask: QuadrotorForceTermMask
-    public let ignoredByNegligibilityPolicyMask: QuadrotorForceTermMask
     public let constraint: QuadrotorConstraintProjection
 
     public init(
@@ -26,9 +23,6 @@ public struct ReferenceQuadrotorFidelity: Sendable, Equatable {
         self.active = active
         self.worldModelTargets = worldModelTargets
         self.ignoredByNegligibilityPolicy = ignoredByNegligibilityPolicy
-        self.activeMask = QuadrotorForceTermMask(active)
-        self.worldModelTargetMask = QuadrotorForceTermMask(worldModelTargets)
-        self.ignoredByNegligibilityPolicyMask = QuadrotorForceTermMask(ignoredByNegligibilityPolicy)
         self.constraint = constraint
     }
 
@@ -41,9 +35,6 @@ public struct ReferenceQuadrotorFidelity: Sendable, Equatable {
         self.active = active
         self.worldModelTargets = worldModelTargets
         self.ignoredByNegligibilityPolicy = ignoredByNegligibilityPolicy
-        self.activeMask = QuadrotorForceTermMask(active)
-        self.worldModelTargetMask = QuadrotorForceTermMask(worldModelTargets)
-        self.ignoredByNegligibilityPolicyMask = QuadrotorForceTermMask(ignoredByNegligibilityPolicy)
         self.constraint = constraint
     }
 
@@ -59,11 +50,7 @@ public struct ReferenceQuadrotorFidelity: Sendable, Equatable {
     )
 
     public func residualTargetIDs(toward high: ReferenceQuadrotorFidelity) -> Set<QuadrotorForceTermID> {
-        residualTargetMask(toward: high).ids
-    }
-
-    public func residualTargetMask(toward high: ReferenceQuadrotorFidelity) -> QuadrotorForceTermMask {
-        worldModelTargetMask.intersection(high.activeMask)
+        worldModelTargets.intersection(high.active)
     }
 
     private static func validate(

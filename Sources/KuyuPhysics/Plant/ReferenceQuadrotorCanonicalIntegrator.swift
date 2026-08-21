@@ -4,9 +4,6 @@ import simd
 public struct ReferenceQuadrotorCanonicalIntegrator: Sendable {
     public enum IntegrationError: Error, Equatable {
         case invalidTimeStep(Double)
-        case duplicateForceTerms([QuadrotorForceTermID])
-        case missingForceTerms([QuadrotorForceTermID])
-        case unsupportedImplicitTerms([QuadrotorForceTermID])
     }
 
     public init() {}
@@ -22,18 +19,28 @@ public struct ReferenceQuadrotorCanonicalIntegrator: Sendable {
         guard delta.isFinite, delta > 0 else {
             throw IntegrationError.invalidTimeStep(delta)
         }
-        let duplicateTermIDs = model.duplicateTermIDs(fidelity: fidelity)
-        guard duplicateTermIDs.isEmpty else {
-            throw IntegrationError.duplicateForceTerms(duplicateTermIDs)
+
+        switch model.program.content.integration.scheme {
+        case .rungeKutta4:
+            return try rungeKutta4Step(
+                state: state,
+                model: model,
+                motorThrusts: motorThrusts,
+                disturbances: disturbances,
+                fidelity: fidelity,
+                delta: delta
+            )
         }
-        let missingTermIDs = model.missingTermIDs(fidelity: fidelity)
-        guard missingTermIDs.isEmpty else {
-            throw IntegrationError.missingForceTerms(missingTermIDs)
-        }
-        let implicitTermIDs = model.implicitTermIDs(fidelity: fidelity)
-        guard implicitTermIDs.isEmpty else {
-            throw IntegrationError.unsupportedImplicitTerms(implicitTermIDs)
-        }
+    }
+
+    private func rungeKutta4Step(
+        state: ReferenceQuadrotorState,
+        model: ReferenceQuadrotorPhysicsModel,
+        motorThrusts: MotorThrusts,
+        disturbances: DisturbanceState,
+        fidelity: ReferenceQuadrotorFidelity,
+        delta: Double
+    ) throws -> ReferenceQuadrotorState {
         let projectedState = fidelity.constraint.project(state: state)
         let k1 = try model.derivative(
             state: projectedState,

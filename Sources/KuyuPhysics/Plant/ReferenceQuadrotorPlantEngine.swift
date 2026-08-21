@@ -6,10 +6,26 @@ public struct ReferenceQuadrotorPlantEngine: PlantEngine {
     }
 
     public var parameters: ReferenceQuadrotorParameters {
-        didSet { model = Self.makeModel(parameters: parameters, mixer: mixer, environment: environment) }
+        didSet {
+            model = Self.makeModel(
+                parameters: parameters,
+                mixer: mixer,
+                environment: environment,
+                program: model.program,
+                executor: model.executor
+            )
+        }
     }
     public var mixer: ReferenceQuadrotorMixer {
-        didSet { model = Self.makeModel(parameters: parameters, mixer: mixer, environment: environment) }
+        didSet {
+            model = Self.makeModel(
+                parameters: parameters,
+                mixer: mixer,
+                environment: environment,
+                program: model.program,
+                executor: model.executor
+            )
+        }
     }
     public var store: ReferenceQuadrotorWorldStore
     public let timeStep: TimeStep
@@ -23,13 +39,20 @@ public struct ReferenceQuadrotorPlantEngine: PlantEngine {
         store: ReferenceQuadrotorWorldStore,
         timeStep: TimeStep,
         environment: WorldEnvironment = .standard
-    ) {
+    ) throws {
+        let program = try ReferenceQuadrotorCanonicalProgram.make()
         self.parameters = parameters
         self.mixer = mixer
         self.store = store
         self.timeStep = timeStep
         self.environment = environment
-        self.model = Self.makeModel(parameters: parameters, mixer: mixer, environment: environment)
+        self.model = Self.makeModel(
+            parameters: parameters,
+            mixer: mixer,
+            environment: environment,
+            program: program,
+            executor: ReferenceQuadrotorScalarDynamicsExecutor()
+        )
         self.integrator = ReferenceQuadrotorCanonicalIntegrator()
     }
 
@@ -66,12 +89,16 @@ public struct ReferenceQuadrotorPlantEngine: PlantEngine {
     private static func makeModel(
         parameters: ReferenceQuadrotorParameters,
         mixer: ReferenceQuadrotorMixer,
-        environment: WorldEnvironment
+        environment: WorldEnvironment,
+        program: CanonicalDynamicsProgram,
+        executor: any ReferenceQuadrotorCanonicalExecuting
     ) -> ReferenceQuadrotorPhysicsModel {
         ReferenceQuadrotorPhysicsModel(
             parameters: parameters,
             mixer: mixer,
-            environment: environment
+            environment: environment,
+            program: program,
+            executor: executor
         )
     }
 

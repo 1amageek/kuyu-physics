@@ -6,7 +6,14 @@ public struct SinglePropPlantEngine: PlantEngine {
     }
 
     public var parameters: ReferenceQuadrotorParameters {
-        didSet { model = Self.makeModel(parameters: parameters, environment: environment) }
+        didSet {
+            model = Self.makeModel(
+                parameters: parameters,
+                environment: environment,
+                program: model.program,
+                executor: model.executor
+            )
+        }
     }
     public var store: ReferenceQuadrotorWorldStore
     public let timeStep: TimeStep
@@ -19,12 +26,18 @@ public struct SinglePropPlantEngine: PlantEngine {
         store: ReferenceQuadrotorWorldStore,
         timeStep: TimeStep,
         environment: WorldEnvironment = .standard
-    ) {
+    ) throws {
+        let program = try ReferenceQuadrotorCanonicalProgram.make()
         self.parameters = parameters
         self.store = store
         self.timeStep = timeStep
         self.environment = environment
-        self.model = Self.makeModel(parameters: parameters, environment: environment)
+        self.model = Self.makeModel(
+            parameters: parameters,
+            environment: environment,
+            program: program,
+            executor: ReferenceQuadrotorScalarDynamicsExecutor()
+        )
         self.integrator = ReferenceQuadrotorCanonicalIntegrator()
     }
 
@@ -47,7 +60,9 @@ public struct SinglePropPlantEngine: PlantEngine {
 
     private static func makeModel(
         parameters: ReferenceQuadrotorParameters,
-        environment: WorldEnvironment
+        environment: WorldEnvironment,
+        program: CanonicalDynamicsProgram,
+        executor: any ReferenceQuadrotorCanonicalExecuting
     ) -> ReferenceQuadrotorPhysicsModel {
         ReferenceQuadrotorPhysicsModel(
             parameters: parameters,
@@ -55,7 +70,9 @@ public struct SinglePropPlantEngine: PlantEngine {
                 armLength: parameters.armLength,
                 yawCoefficient: parameters.yawCoefficient
             ),
-            environment: environment
+            environment: environment,
+            program: program,
+            executor: executor
         )
     }
 

@@ -34,7 +34,7 @@ extension DescriptorCorpusAcceptanceService {
                 store: store,
                 timeStep: entry.timeStep
             )
-            var plant = SinglePropPlantEngine(
+            var plant = try SinglePropPlantEngine(
                 parameters: parameters,
                 store: store,
                 timeStep: entry.timeStep,
@@ -74,7 +74,7 @@ extension DescriptorCorpusAcceptanceService {
                 store: store,
                 timeStep: entry.timeStep
             )
-            var plant = ReferenceQuadrotorPlantEngine(
+            var plant = try ReferenceQuadrotorPlantEngine(
                 parameters: parameters,
                 mixer: ReferenceQuadrotorMixer(
                     armLength: parameters.armLength,
