@@ -25,7 +25,9 @@ public struct SinglePropPlantEngine: PlantEngine {
         parameters: ReferenceQuadrotorParameters,
         store: ReferenceQuadrotorWorldStore,
         timeStep: TimeStep,
-        environment: WorldEnvironment = .standard
+        environment: WorldEnvironment = .standard,
+        canonicalExecutor: any ReferenceQuadrotorCanonicalExecuting =
+            ReferenceQuadrotorScalarDynamicsExecutor()
     ) throws {
         let program = try ReferenceQuadrotorCanonicalProgram.make()
         self.parameters = parameters
@@ -36,7 +38,7 @@ public struct SinglePropPlantEngine: PlantEngine {
             parameters: parameters,
             environment: environment,
             program: program,
-            executor: ReferenceQuadrotorScalarDynamicsExecutor()
+            executor: canonicalExecutor
         )
         self.integrator = ReferenceQuadrotorCanonicalIntegrator()
     }

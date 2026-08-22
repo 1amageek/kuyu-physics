@@ -32,16 +32,24 @@ SHA-256 digest.
 
 ```text
 CanonicalDynamicsProgram
-  -> ReferenceQuadrotorScalarDynamicsExecutor (Swift Float64 reference)
-      -> ReferenceQuadrotorPhysicsModel
-          -> ReferenceQuadrotorPlantEngine / SinglePropPlantEngine
-          -> IMU6SensorField
+  -> ReferenceQuadrotorPhysicsModel
+      -> ReferenceQuadrotorCanonicalExecuting
+          -> ReferenceQuadrotorScalarDynamicsExecutor (Swift Float64 reference)
+          -> externally injected qualified executors (Mojo CPU today)
+      -> ReferenceQuadrotorPlantEngine / SinglePropPlantEngine
+      -> IMU6SensorField
 ```
+
+The plant and IMU construction boundaries accept one canonical executor and
+retain it for the complete engine lifetime. The scalar executor is the explicit
+default. A caller may inject a qualified backend without forking equations or
+changing Plant/Sensor semantics; execution failure is propagated and never
+falls back to the scalar implementation.
 
 The current reference digest is
 `6c6773c5a824508fd683390aa7a4acdc1636e8c8483f6ac9ee9667bf62d54310`.
 Closure-backed force terms and duplicated sensor equations are not fallback
-paths. Future Mojo CPU, Metal, and CUDA executors must consume this program and
+paths. Mojo CPU and future Metal/CUDA executors must consume this program and
 qualify against the same digest and golden traces.
 
 ## Articulated Simulator Contracts

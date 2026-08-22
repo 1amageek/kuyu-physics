@@ -38,7 +38,9 @@ public struct ReferenceQuadrotorPlantEngine: PlantEngine {
         mixer: ReferenceQuadrotorMixer,
         store: ReferenceQuadrotorWorldStore,
         timeStep: TimeStep,
-        environment: WorldEnvironment = .standard
+        environment: WorldEnvironment = .standard,
+        canonicalExecutor: any ReferenceQuadrotorCanonicalExecuting =
+            ReferenceQuadrotorScalarDynamicsExecutor()
     ) throws {
         let program = try ReferenceQuadrotorCanonicalProgram.make()
         self.parameters = parameters
@@ -51,7 +53,7 @@ public struct ReferenceQuadrotorPlantEngine: PlantEngine {
             mixer: mixer,
             environment: environment,
             program: program,
-            executor: ReferenceQuadrotorScalarDynamicsExecutor()
+            executor: canonicalExecutor
         )
         self.integrator = ReferenceQuadrotorCanonicalIntegrator()
     }

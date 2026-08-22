@@ -37,7 +37,9 @@ public struct IMU6SensorField: SensorField {
         accelNoiseStdDev: Double,
         accelBias: Double,
         accelRandomWalkSigma: Double,
-        delaySteps: UInt64 = 0
+        delaySteps: UInt64 = 0,
+        canonicalExecutor: any ReferenceQuadrotorCanonicalExecuting =
+            ReferenceQuadrotorScalarDynamicsExecutor()
     ) throws {
         guard gyroNoiseStdDev.isFinite else { throw ValidationError.nonFinite("gyroNoiseStdDev") }
         guard gyroBias.isFinite else { throw ValidationError.nonFinite("gyroBias") }
@@ -61,7 +63,8 @@ public struct IMU6SensorField: SensorField {
             parameters: parameters,
             mixer: mixer,
             environment: environment,
-            program: program
+            program: program,
+            executor: canonicalExecutor
         )
         self.gyroNoise = [
             AxisNoiseModel(bias: gyroBias, noiseStdDev: gyroNoiseStdDev, randomWalkSigma: gyroRandomWalkSigma, seed: noiseSeed &+ 1),
